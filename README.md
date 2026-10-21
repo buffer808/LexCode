@@ -21,6 +21,28 @@ code --install-extension lex-code-0.0.2.vsix
 
 Or press F5 in VS Code to try it in an Extension Development Host.
 
+### Manual install (after compile)
+
+Once `npx @vscode/vsce package` has produced `lex-code-0.0.2.vsix` in the project root:
+
+1. Open the **Extensions** view (`Cmd+Shift+X` / `Ctrl+Shift+X`).
+2. Click the **`…`** (Views and More Actions) menu at the top of the view.
+3. Choose **Install from VSIX…**.
+4. Select `lex-code-0.0.2.vsix` and reload the window when prompted.
+
+Alternatively, run **Extensions: Install from VSIX…** from the Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`).
+
+### Install in Devin
+
+Devin's editor is VS Code-based, so it installs the same `.vsix`:
+
+1. Build the package as above (or copy `lex-code-0.0.2.vsix` into the Devin workspace).
+2. In Devin's editor, open the **Extensions** view → **`…`** menu → **Install from VSIX…**, and pick the file.
+   - Or from Devin's terminal: `code --install-extension lex-code-0.0.2.vsix`
+3. Reload the window; the **LexCode** icon appears in the activity bar.
+
+Background runs and the sparkle action need the `claude` CLI available in Devin's environment (set `lexCode.claudePath` if it isn't on `PATH`).
+
 ## Usage
 
 Open the **LexCode** icon in the activity bar to see the **Board** view.
