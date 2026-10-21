@@ -2,8 +2,13 @@
   "name": "lex-code",
   "displayName": "LexCode",
   "description": "Agile project manager for concurrent projects with Claude Code sessions",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "lex",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/buffer808/LexCode.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -262,8 +267,20 @@
         },
         "lexCode.tasksScanSkip": {
           "type": "array",
-          "items": { "type": "string" },
-          "default": ["node_modules", ".git", "out", "dist", "build", ".next", "vendor", ".venv", "target"],
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "node_modules",
+            ".git",
+            "out",
+            "dist",
+            "build",
+            ".next",
+            "vendor",
+            ".venv",
+            "target"
+          ],
           "description": "Folder names skipped when scanning a project for TASKS.md. Remove an entry to scan it; empty list scans everything"
         },
         "lexCode.claudePath": {

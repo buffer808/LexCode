@@ -16,7 +16,7 @@ When the tool that kept all those projects, sprints and sessions in one place ne
 npm install
 npm run compile
 npx @vscode/vsce package
-code --install-extension lex-code-0.0.1.vsix
+code --install-extension lex-code-0.0.2.vsix
 ```
 
 Or press F5 in VS Code to try it in an Extension Development Host.
