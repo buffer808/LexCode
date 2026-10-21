@@ -141,7 +141,7 @@ export function showDashboard(context: vscode.ExtensionContext, store: Store, tr
         break;
       }
       case 'unlink': if (story) store.update('stories', story.id, { sessionIds: (story.sessionIds ?? []).filter(id => id !== m.sessionId) }); break;
-      case 'attach': {
+      case 'addAttachment': {
         if (!story || typeof m.data !== 'string' || typeof m.name !== 'string') return;
         const bytes = Buffer.from(m.data, 'base64');
         if (bytes.length > MAX_ATTACHMENT) return vscode.window.showErrorMessage(`${m.name} is over 25 MB.`);
@@ -192,7 +192,7 @@ export function showDashboard(context: vscode.ExtensionContext, store: Store, tr
     tree.onDidChangeTreeData(push),
     agents.onDidChange(push),
     w.onDidReceiveMessage(async m => {
-      log.appendLine(`dashboard → ${m?.type === 'attach' ? `attach ${m.name}` : JSON.stringify(m)}`);
+      log.appendLine(`dashboard → ${m?.type === 'addAttachment' ? `addAttachment ${m.name}` : JSON.stringify(m)}`);
       try { await handle(m); } catch (e: any) {
         log.appendLine(`error: ${e?.stack ?? e}`);
         vscode.window.showErrorMessage(`LexCode dashboard: ${e?.message ?? e}`);

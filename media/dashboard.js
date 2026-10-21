@@ -155,7 +155,7 @@ const update = patch => send('update', { patch });
 function upload(files) {
   for (const f of files) {
     const r = new FileReader();
-    r.onload = () => send('attach', { name: f.name, mime: f.type, data: String(r.result).split(',')[1] });
+    r.onload = () => send('addAttachment', { name: f.name, mime: f.type, data: String(r.result).split(',')[1] });
     r.readAsDataURL(f);
   }
 }
