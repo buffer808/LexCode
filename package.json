@@ -1,0 +1,288 @@
+{
+  "name": "lex-code",
+  "displayName": "LexCode",
+  "description": "Agile project manager for concurrent projects with Claude Code sessions",
+  "version": "0.0.1",
+  "publisher": "lex",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "lexCode",
+          "title": "LexCode",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "lexCode": [
+        {
+          "id": "lexCode.board",
+          "name": "Board"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "lexCode.addProject",
+        "title": "LexCode: Add Project",
+        "icon": "$(add)"
+      },
+      {
+        "command": "lexCode.removeProject",
+        "title": "LexCode: Remove Project",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "lexCode.refresh",
+        "title": "LexCode: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "lexCode.openProject",
+        "title": "LexCode: Open Project in Workspace",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "lexCode.openAllProjects",
+        "title": "LexCode: Open All Projects in Workspace",
+        "icon": "$(folder-library)"
+      },
+      {
+        "command": "lexCode.newEpic",
+        "title": "LexCode: New Epic",
+        "icon": "$(layers)"
+      },
+      {
+        "command": "lexCode.newSprint",
+        "title": "LexCode: New Sprint",
+        "icon": "$(milestone)"
+      },
+      {
+        "command": "lexCode.startSprint",
+        "title": "LexCode: Start Sprint",
+        "icon": "$(play)"
+      },
+      {
+        "command": "lexCode.newStory",
+        "title": "LexCode: New Story",
+        "icon": "$(add)"
+      },
+      {
+        "command": "lexCode.editStory",
+        "title": "LexCode: Edit Story",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "lexCode.setStatus",
+        "title": "LexCode: Set Status",
+        "icon": "$(check)"
+      },
+      {
+        "command": "lexCode.deleteItem",
+        "title": "LexCode: Delete",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "lexCode.resumeSession",
+        "title": "LexCode: Resume Claude Session",
+        "icon": "$(history)"
+      },
+      {
+        "command": "lexCode.claudeStory",
+        "title": "LexCode: Open Claude Session",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "lexCode.importTasks",
+        "title": "LexCode: Import Tasks from TASKS.md",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "lexCode.dashboard",
+        "title": "LexCode: Open Dashboard",
+        "icon": "$(dashboard)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "lexCode.dashboard",
+          "when": "view == lexCode.board",
+          "group": "navigation"
+        },
+        {
+          "command": "lexCode.addProject",
+          "when": "view == lexCode.board",
+          "group": "navigation"
+        },
+        {
+          "command": "lexCode.openAllProjects",
+          "when": "view == lexCode.board",
+          "group": "navigation"
+        },
+        {
+          "command": "lexCode.refresh",
+          "when": "view == lexCode.board",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "lexCode.claudeStory",
+          "when": "viewItem =~ /^story/",
+          "group": "inline@1"
+        },
+        {
+          "command": "lexCode.setStatus",
+          "when": "viewItem =~ /^story/",
+          "group": "inline@2"
+        },
+        {
+          "command": "lexCode.editStory",
+          "when": "viewItem =~ /^story/",
+          "group": "inline@3"
+        },
+        {
+          "command": "lexCode.deleteItem",
+          "when": "viewItem =~ /^story/",
+          "group": "9"
+        },
+        {
+          "command": "lexCode.openProject",
+          "when": "viewItem == project",
+          "group": "inline@1"
+        },
+        {
+          "command": "lexCode.newEpic",
+          "when": "viewItem == project",
+          "group": "inline@2"
+        },
+        {
+          "command": "lexCode.newSprint",
+          "when": "viewItem == project",
+          "group": "inline@3"
+        },
+        {
+          "command": "lexCode.newStory",
+          "when": "viewItem == project",
+          "group": "inline@4"
+        },
+        {
+          "command": "lexCode.importTasks",
+          "when": "viewItem == project",
+          "group": "8"
+        },
+        {
+          "command": "lexCode.removeProject",
+          "when": "viewItem == project",
+          "group": "inline@9"
+        },
+        {
+          "command": "lexCode.newStory",
+          "when": "viewItem =~ /^(epic|noEpic|sprint|backlog)$/",
+          "group": "inline@2"
+        },
+        {
+          "command": "lexCode.startSprint",
+          "when": "viewItem == sprint",
+          "group": "inline@1"
+        },
+        {
+          "command": "lexCode.deleteItem",
+          "when": "viewItem =~ /^(sprint|epic)$/",
+          "group": "9"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "lexCode.startSprint",
+          "when": "false"
+        },
+        {
+          "command": "lexCode.editStory",
+          "when": "false"
+        },
+        {
+          "command": "lexCode.setStatus",
+          "when": "false"
+        },
+        {
+          "command": "lexCode.deleteItem",
+          "when": "false"
+        },
+        {
+          "command": "lexCode.resumeSession",
+          "when": "false"
+        },
+        {
+          "command": "lexCode.claudeStory",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "LexCode",
+      "properties": {
+        "lexCode.claudeLauncher": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "cli"
+          ],
+          "default": "auto",
+          "enumDescriptions": [
+            "Claude Code extension if installed, else CLI",
+            "Always claude CLI in a terminal"
+          ]
+        },
+        "lexCode.backgroundPermissionMode": {
+          "type": "string",
+          "enum": [
+            "manual",
+            "acceptEdits",
+            "plan",
+            "auto",
+            "bypassPermissions"
+          ],
+          "default": "manual",
+          "enumDescriptions": [
+            "Pause and wait for you to approve (Attach)",
+            "Auto-approve file edits; ask for commands",
+            "Read-only planning",
+            "Claude decides what is safe",
+            "Skip all permission checks (dangerous)"
+          ],
+          "description": "Default permission mode for background Claude runs"
+        },
+        "lexCode.tasksScanSkip": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["node_modules", ".git", "out", "dist", "build", ".next", "vendor", ".venv", "target"],
+          "description": "Folder names skipped when scanning a project for TASKS.md. Remove an entry to scan it; empty list scans everything"
+        },
+        "lexCode.claudePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the claude CLI (auto-detected if empty)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "test": "tsc -p . && node --test out/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.0"
+  },
+  "license": "UNLICENSED"
+}
