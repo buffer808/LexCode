@@ -64,6 +64,16 @@
         "icon": "$(layers)"
       },
       {
+        "command": "lexCode.runFactory",
+        "title": "LexCode: Run Software Factory on Epic",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "lexCode.openPlan",
+        "title": "LexCode: Open Factory Plan",
+        "icon": "$(book)"
+      },
+      {
         "command": "lexCode.newSprint",
         "title": "LexCode: New Sprint",
         "icon": "$(milestone)"
@@ -212,6 +222,16 @@
           "command": "lexCode.deleteItem",
           "when": "viewItem =~ /^(sprint|epic)$/",
           "group": "9"
+        },
+        {
+          "command": "lexCode.runFactory",
+          "when": "viewItem == epic",
+          "group": "1"
+        },
+        {
+          "command": "lexCode.openPlan",
+          "when": "viewItem == epic",
+          "group": "1"
         }
       ],
       "commandPalette": [
@@ -237,6 +257,14 @@
         },
         {
           "command": "lexCode.claudeStory",
+          "when": "false"
+        },
+        {
+          "command": "lexCode.runFactory",
+          "when": "false"
+        },
+        {
+          "command": "lexCode.openPlan",
           "when": "false"
         }
       ]
@@ -297,6 +325,127 @@
           "type": "string",
           "default": "",
           "description": "Path to the claude CLI (auto-detected if empty)"
+        },
+        "lexCode.factory.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "New epics start the software factory: plan → revalidate → security check → your approval. Off: New Epic only creates the epic."
+        },
+        "lexCode.factory.builderPermissionMode": {
+          "type": "string",
+          "enum": [
+            "acceptEdits",
+            "auto"
+          ],
+          "default": "acceptEdits",
+          "enumDescriptions": [
+            "Accept edits: builders auto-approve file edits and pause for shell command approvals",
+            "Full auto: builders run unattended (Claude Code auto mode)"
+          ],
+          "description": "Builder mode preselected when creating a factory epic"
+        },
+        "lexCode.factory.targetBranch": {
+          "type": "string",
+          "default": "main",
+          "description": "Default pull request target branch for factory epics"
+        },
+        "lexCode.factory.models": {
+          "type": "object",
+          "default": {
+            "planner": {
+              "model": "opus",
+              "effort": "high"
+            },
+            "builder": {},
+            "reviewer": {}
+          },
+          "description": "Model and effort per factory role: planner (plan, revalidate, security), builder, reviewer. model: alias (opus, sonnet, haiku, fable) or full id; effort: low|medium|high|xhigh|max. Empty = Claude default. A project agent's own frontmatter model wins over this; a per-epic choice wins over both.",
+          "properties": {
+            "planner": {
+              "type": "object",
+              "properties": {
+                "model": {
+                  "type": "string"
+                },
+                "effort": {
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
+                }
+              }
+            },
+            "builder": {
+              "type": "object",
+              "properties": {
+                "model": {
+                  "type": "string"
+                },
+                "effort": {
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
+                }
+              }
+            },
+            "reviewer": {
+              "type": "object",
+              "properties": {
+                "model": {
+                  "type": "string"
+                },
+                "effort": {
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "lexCode.factory.defaultWorkers": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 8,
+          "description": "Builders preselected when starting a factory build. Parallel-safe sprints run side by side in separate git worktrees, up to this many."
+        },
+        "lexCode.factory.maxReviewAttempts": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 1,
+          "description": "Review failures per story (or sprint) before the factory stops and asks you to retry, take over or skip."
+        },
+        "lexCode.factory.sensitivePaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/auth/**",
+            "**/migrations/**",
+            ".github/**",
+            "package.json",
+            "*lock*",
+            "**/*.env*",
+            "Dockerfile"
+          ],
+          "description": "Gitignore-style globs. A sprint that changes a matching file waits for your approval before merging into the epic branch."
         }
       }
     }

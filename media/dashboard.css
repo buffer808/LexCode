@@ -127,3 +127,43 @@ button:disabled { opacity: 0.6; cursor: progress; }
 .state.working { background: var(--vscode-charts-blue, #3794ff); color: #fff; }
 .state.done { background: var(--vscode-charts-green, #89d185); color: #000; }
 .story.archived { opacity: 0.5; }
+/* software factory */
+dialog#epic { width: min(860px, 94vw); max-height: 90vh; padding: 0; color: var(--vscode-foreground);
+  background: var(--vscode-editor-background, Canvas); border: 1px solid var(--line); border-radius: 8px; }
+dialog#epic::backdrop { background: rgba(0, 0, 0, 0.5); }
+dialog#epic textarea { min-height: 180px; }
+.modal details.models { margin-top: 16px; }
+.modal details.models summary { cursor: pointer; color: var(--vscode-descriptionForeground); }
+.modal details.models .grid { display: grid; grid-template-columns: 1fr auto auto; gap: 6px 8px; align-items: center; margin-top: 8px; font-size: 0.9em; }
+.modal .grid select, .epic-strip textarea { font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--line)); border-radius: var(--radius); padding: 4px 6px; }
+.epics { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+.epic-strip { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.epic-strip.needs { border-color: var(--accent); }
+.epic-strip .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.epic-strip .spacer { flex: 1; }
+.epic-strip .gate { margin-top: 10px; align-items: stretch; }
+.epic-strip .gate textarea { flex: 1; min-width: 200px; resize: vertical; }
+.epic-strip p { margin: 6px 0 0; }
+.badge { padding: 1px 8px; border-radius: 10px; font-size: 0.85em; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
+.badge.stage-awaitingPlanApproval, .badge.stage-awaitingPrApproval, .badge.stage-paused { background: var(--accent); color: var(--accent-fg); }
+.badge.stage-ready, .badge.stage-done { background: var(--c-done); color: #000; }
+.badge.stage-failed, .badge.stage-cancelled { background: transparent; border: 1px solid var(--line); color: var(--vscode-descriptionForeground); }
+.error { color: var(--vscode-errorForeground); }
+.error:empty { display: none; }
+.epic-strip .sprints { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.epic-strip .sprint { padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius); }
+.epic-strip .sprint.needs { border-color: var(--accent); }
+.epic-strip .sprint .row + .row { margin-top: 6px; }
+.epic-strip input { font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--line)); border-radius: var(--radius); padding: 4px 6px; }
+.epic-strip label.inline { display: flex; align-items: center; gap: 6px; }
+.epic-strip .reasons { margin: 6px 0 0; padding-left: 18px; color: var(--vscode-editorWarning-foreground, #cca700); }
+.badge.state-awaitingMerge { background: var(--accent); color: var(--accent-fg); }
+.badge.state-merged { background: var(--c-done); color: #000; }
+.badge.state-building, .badge.state-reviewing, .badge.state-fixing { background: var(--c-doing); color: #fff; }
+.badge.stage-building { background: var(--c-doing); color: #fff; }
+.epic-strip .epic-title { padding: 0; background: transparent; font-weight: 600; color: var(--vscode-textLink-foreground); }
+.epic-strip .epic-title:hover, .epic-strip .link:hover { text-decoration: underline; background: transparent; }
+.epic-strip .link small { color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family); }
+.epic-strip button.link { padding: 0 2px; background: transparent; }

@@ -5,8 +5,43 @@ import { randomUUID, createHash } from 'crypto';
 export type Status = 'todo' | 'doing' | 'review' | 'done';
 
 export interface Project { id: string; name: string; path: string }
-export interface Epic { id: string; projectId: string; title: string }
-export interface Sprint { id: string; projectId: string; name: string; start?: string; end?: string; active: boolean }
+
+/* ---------- software factory (epic → plan → build → review → PR) ---------- */
+export type EpicStage = 'planning' | 'revalidating' | 'securityCheck' | 'awaitingPlanApproval'
+  | 'ready' | 'building' | 'paused' | 'awaitingPrApproval' | 'done' | 'failed' | 'cancelled';
+export type Role = 'orchestrator' | 'revalidator' | 'security' | 'builder' | 'reviewer';
+export type ModelRole = 'planner' | 'builder' | 'reviewer'; // planner = orchestrator, revalidator, security
+export interface ModelChoice { model?: string; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' }
+// Epic-level human decision. Merge and retry decisions live on the sprint/story (awaitingMerge, blocked).
+export interface Gate { kind: 'plan' | 'pr'; reason?: string }
+
+export interface Epic {
+  id: string; projectId: string; title: string;
+  description?: string;
+  stage?: EpicStage; // undefined = manual epic (legacy/imported); the factory ignores it
+  baseBranch?: string; targetBranch?: string; branch?: string;
+  workers?: number;
+  builderMode?: 'acceptEdits' | 'auto';
+  models?: Partial<Record<ModelRole, ModelChoice>>;
+  roleAgents?: Partial<Record<Role, string>>; // role → agent name, frozen at creation
+  stageSessionId?: string; stageStartedAt?: number; stageAttempts?: number;
+  feedback?: string; // human "request changes" text for the next planning run
+  pending?: Gate;
+  prUrl?: string; error?: string;
+}
+export interface Sprint {
+  id: string; projectId: string; name: string; start?: string; end?: string; active: boolean;
+  // Factory sprints belong to an epic; the single-active-sprint rule only applies to sprints without one.
+  epicId?: string; key?: string; order?: number; dependsOn?: string[]; parallel?: boolean;
+  branch?: string; worktree?: string;
+  state?: SprintState;
+  sessionId?: string; runStartedAt?: number; // sprint review or fix session
+  attempts?: number; fixups?: number;        // failed sprint reviews; invalid-output corrections
+  issues?: string[]; risk?: 'minor' | 'critical';
+  critical?: string[]; // reasons the merge waits for human approval (state awaitingMerge)
+  blocked?: string;    // needs a human: retries exhausted, invalid output, launch error
+}
+export type SprintState = 'waiting' | 'building' | 'reviewing' | 'fixing' | 'awaitingMerge' | 'merged';
 export interface Attachment { id: string; name: string; file: string; mime: string }
 export interface Story {
   id: string; projectId: string; title: string; status: Status;
@@ -15,6 +50,10 @@ export interface Story {
   archived?: boolean; // hidden from board/tree unless "Show archived"
   // Imported stories: line the story came from (status is written back there) and related task files.
   source?: SourceRef; refs?: string[];
+  // Factory: builder → reviewer loop bookkeeping.
+  attempts?: number; fixups?: number; reviewNotes?: string; builderSessionId?: string; reviewerSessionId?: string;
+  baseCommit?: string; runStartedAt?: number;
+  blocked?: string; // needs a human: retries exhausted, invalid output, launch error
 }
 export interface SourceRef { file: string; line: number }
 

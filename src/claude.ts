@@ -88,20 +88,25 @@ function claudeBin(): string {
 const run = promisify(execFile);
 
 // Starts a new background session for the story, or continues `sessionId` with `followUp`.
-// Returns the real session id: --bg picks its own id (it ignores --session-id), printed as "backgrounded · <short id>".
 export async function runInBackground(project: Project, story: Story, attachDir: string, mode: string, sessionId?: string, followUp?: string) {
   if (!(mode in PERMISSION_MODES)) throw new Error(`Unknown permission mode ${mode}`);
-  const args = ['--bg', '--permission-mode', mode, ...addDir(story, attachDir), ...(sessionId ? ['--resume', sessionId] : []),
-    sessionId ? followUp ?? 'Continue.' : storyPrompt(story, attachDir)];
+  return launchBackground(project, ['--permission-mode', mode, ...addDir(story, attachDir), ...(sessionId ? ['--resume', sessionId] : []),
+    sessionId ? followUp ?? 'Continue.' : storyPrompt(story, attachDir)]);
+}
+
+// `claude --bg <args>` in `cwd` (default: the project). Returns the real session id:
+// --bg picks its own id (it ignores --session-id), printed as "backgrounded · <short id>".
+// undefined = folder not trusted yet (user was shown how to fix it).
+export async function launchBackground(project: Project, args: string[], cwd = project.path): Promise<string | undefined> {
   let stdout: string;
   try {
-    ({ stdout } = await run(claudeBin(), args, { cwd: project.path, timeout: 60000 }));
+    ({ stdout } = await run(claudeBin(), ['--bg', ...args], { cwd, timeout: 60000 }));
   } catch (e: any) {
     const err = String(e?.stderr || e?.message || e).trim();
     if (/not trusted/i.test(err)) {
       // --bg refuses untrusted folders; trusting is the user's call, so open claude there to show the prompt.
-      const c = await vscode.window.showErrorMessage(`Claude doesn't trust ${project.path} yet. Accept the trust prompt once, then run again.`, 'Trust folder…');
-      if (c) terminal(project, '');
+      const c = await vscode.window.showErrorMessage(`Claude doesn't trust ${cwd} yet. Accept the trust prompt once, then run again.`, 'Trust folder…');
+      if (c) terminal({ ...project, path: cwd }, '');
       return undefined;
     }
     throw new Error(err);
@@ -117,21 +122,25 @@ export async function runInBackground(project: Project, story: Story, attachDir:
   throw new Error(`Background run ${short} started but isn't listed by \`claude agents\` yet; link it from the session list.`);
 }
 
-export interface Agent { id: string; sessionId: string; state: string; name?: string }
+export interface Agent { id: string; sessionId: string; state: string; name?: string; startedAt?: number }
 
+// Keyed by session id; a resumed session can be listed more than once, newest run wins.
 export async function backgroundAgents(): Promise<Record<string, Agent>> {
   const { stdout } = await run(claudeBin(), ['agents', '--json', '--all'], { timeout: 15000 });
   const list: any[] = JSON.parse(stdout);
-  return Object.fromEntries(list.filter(a => a.kind === 'background')
-    .map(a => [a.sessionId, { id: a.id, sessionId: a.sessionId, state: a.state ?? a.status ?? 'unknown', name: a.name }]));
+  const out: Record<string, Agent> = {};
+  for (const a of list.filter(a => a.kind === 'background').sort((x, y) => (x.startedAt ?? 0) - (y.startedAt ?? 0))) {
+    out[a.sessionId] = { id: a.id, sessionId: a.sessionId, state: a.state ?? a.status ?? 'unknown', name: a.name, startedAt: a.startedAt };
+  }
+  return out;
 }
 
 export function attach(project: Project, agentId: string) {
   terminal(project, `attach ${agentId}`);
 }
 
-// Polls background agents linked to stories; notifies on state changes (blocked = needs approval).
-// ponytail: spawns `claude agents` every 5s while any story has sessions; switch to a file watch if the CLI exposes one.
+// Polls background agents linked to stories and factory epics; notifies on state changes (blocked = needs approval).
+// ponytail: spawns `claude agents` every 5s while anything is linked; switch to a file watch if the CLI exposes one.
 export class AgentWatcher implements vscode.Disposable {
   agents: Record<string, Agent> = {};
   private changed = new vscode.EventEmitter<void>();
@@ -144,25 +153,31 @@ export class AgentWatcher implements vscode.Disposable {
   async poll() {
     if (this.busy) return;
     const b = this.store.all();
-    const storyOf = new Map(b.stories.flatMap(s => (s.sessionIds ?? []).map(id => [id, s] as const)));
-    if (!storyOf.size) return;
+    // Factory stage sessions only alert when blocked; the factory announces its own progress.
+    const tracked = new Map<string, { title: string; projectId: string; quiet: boolean }>([
+      ...b.stories.flatMap(s => (s.sessionIds ?? []).map(id => [id, { title: s.title, projectId: s.projectId, quiet: false }] as const)),
+      ...b.epics.flatMap(e => e.stageSessionId ? [[e.stageSessionId, { title: `${e.title} (${e.stage})`, projectId: e.projectId, quiet: true }] as const] : []),
+      ...b.stories.flatMap(s => [s.builderSessionId, s.reviewerSessionId].flatMap(id => id ? [[id, { title: s.title, projectId: s.projectId, quiet: true }] as const] : [])),
+      ...b.sprints.flatMap(s => s.sessionId ? [[s.sessionId, { title: s.name, projectId: s.projectId, quiet: true }] as const] : []),
+    ]);
+    if (!tracked.size) return;
     this.busy = true;
     try {
       const all = await backgroundAgents();
-      const next = Object.fromEntries(Object.entries(all).filter(([sid]) => storyOf.has(sid)));
+      const next = Object.fromEntries(Object.entries(all).filter(([sid]) => tracked.has(sid)));
       let dirty = Object.keys(next).length !== Object.keys(this.agents).length;
       for (const [sid, a] of Object.entries(next)) {
         const prev = this.agents[sid];
         if (prev?.state === a.state) continue;
         dirty = true;
-        const story = storyOf.get(sid)!;
-        const project = b.projects.find(p => p.id === story.projectId);
+        const t = tracked.get(sid)!;
+        const project = b.projects.find(p => p.id === t.projectId);
         if (!prev || !project) continue; // first sighting: no alert
         if (a.state === 'blocked') {
-          vscode.window.showWarningMessage(`Claude needs your approval: "${story.title}"`, 'Attach')
+          vscode.window.showWarningMessage(`Claude needs your approval: "${t.title}"`, 'Attach')
             .then(c => c && attach(project, a.id));
-        } else {
-          vscode.window.showInformationMessage(`Background run "${story.title}" is now ${a.state}`, 'Attach')
+        } else if (!t.quiet) {
+          vscode.window.showInformationMessage(`Background run "${t.title}" is now ${a.state}`, 'Attach')
             .then(c => c && attach(project, a.id));
         }
       }

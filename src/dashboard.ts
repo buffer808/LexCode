@@ -6,6 +6,8 @@ import { Store, Story, Status } from './store';
 import { BoardTree } from './tree';
 import { listSessions, editedFiles } from './sessions';
 import { AgentWatcher, PERMISSION_MODES, runInBackground, attach } from './claude';
+import { FactoryRunner, Decision } from './factoryRunner';
+import { parseEpicInput, validBranch, STAGE_LABEL, EFFORTS } from './factory';
 
 let panel: vscode.WebviewPanel | undefined;
 const starting = new Set<string>(); // story ids with a background run launching
@@ -27,7 +29,25 @@ function storyPatch(b: ReturnType<Store['all']>, story: Story, raw: any): Partia
   return patch;
 }
 
-export function showDashboard(context: vscode.ExtensionContext, store: Store, tree: BoardTree, agents: AgentWatcher) {
+// Webview input is untrusted: rebuild the decision from known fields only.
+function gateDecision(m: any): Decision | undefined {
+  const str = (v: unknown) => typeof v === 'string' && v.trim() ? v.trim().slice(0, 20000) : undefined;
+  const text = str(m.text), sprintId = str(m.sprintId), storyId = str(m.storyId);
+  switch (m.decision) {
+    case 'approve': case 'reject': case 'retry': case 'cancel': case 'pause': case 'resume': return { decision: m.decision };
+    case 'changes': return text ? { decision: 'changes', text } : undefined;
+    case 'start': case 'workers': return typeof m.workers === 'number' ? { decision: m.decision, workers: m.workers } : undefined;
+    case 'approveMerge': case 'retrySprint': return sprintId ? { decision: m.decision, sprintId } : undefined;
+    case 'sendBack': return sprintId && text ? { decision: 'sendBack', sprintId, text } : undefined;
+    case 'retryStory': case 'skipStory': return storyId ? { decision: m.decision, storyId } : undefined;
+    case 'createPr': {
+      const targetBranch = str(m.targetBranch);
+      return !targetBranch || validBranch(targetBranch) ? { decision: 'createPr', targetBranch } : undefined;
+    }
+  }
+}
+
+export function showDashboard(context: vscode.ExtensionContext, store: Store, tree: BoardTree, agents: AgentWatcher, factory: FactoryRunner) {
   if (panel) return panel.reveal();
   const media = vscode.Uri.joinPath(context.extensionUri, 'media');
   const attachRoot = vscode.Uri.file(store.attachmentsDir());
@@ -39,15 +59,24 @@ export function showDashboard(context: vscode.ExtensionContext, store: Store, tr
   w.html = `<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${w.cspSource}; style-src ${w.cspSource}; script-src 'nonce-${nonce}';">
 <link rel="stylesheet" href="${uri('dashboard.css')}"></head>
-<body><div id="app"></div><dialog id="story"></dialog><script nonce="${nonce}" src="${uri('dashboard.js')}"></script></body></html>`;
+<body><div id="app"></div><dialog id="story"></dialog><dialog id="epic"></dialog><script nonce="${nonce}" src="${uri('dashboard.js')}"></script></body></html>`;
 
   const push = () => {
     const board = store.all();
     // Newest first; drives overview "last Claude activity" and the story modal's session list.
     const sessions = Object.fromEntries(board.projects.map(p => [p.id, listSessions(p.path)]));
+    // Factory epic form: each project's agents and their detected roles, plus setting defaults.
+    const cfg = vscode.workspace.getConfiguration('lexCode.factory');
+    const roleAgents = Object.fromEntries(board.projects.map(p => {
+      try { const r = factory.detectedRoles(p); return [p.id, { agents: r.agents.map(a => ({ name: a.name, description: a.description, scope: a.scope })), roles: r.roles }]; }
+      catch (e: any) { return [p.id, { agents: [], roles: {}, error: e.message }]; }
+    }));
     w.postMessage({ type: 'board', board, sessions, agents: agents.agents, starting: [...starting], modes: PERMISSION_MODES,
       defaultMode: vscode.workspace.getConfiguration('lexCode').get('backgroundPermissionMode', 'manual'),
-      attachBase: w.asWebviewUri(attachRoot).toString() });
+      attachBase: w.asWebviewUri(attachRoot).toString(),
+      factory: { roleAgents, stages: STAGE_LABEL,
+        plans: Object.fromEntries(board.projects.flatMap(p => Object.entries(factory.planPaths(p.path, board.epics.filter(e => e.projectId === p.id && e.stage).map(e => e.id))))), efforts: EFFORTS, targetBranch: cfg.get('targetBranch', 'main'),
+        builderMode: cfg.get('builderPermissionMode', 'acceptEdits'), models: cfg.get('models', {}), workers: cfg.get('defaultWorkers', 1) } });
   };
 
   const handle = async (m: any) => {
@@ -171,6 +200,47 @@ export function showDashboard(context: vscode.ExtensionContext, store: Store, tr
         fs.rmSync(path.join(store.attachmentsDir(story!.id), a.file), { force: true });
         store.update('stories', story!.id, { attachments: story!.attachments!.filter(x => x.id !== a.id) });
         break;
+      }
+      case 'addEpic': {
+        const project = b.projects.find(p => p.id === m.id);
+        if (!project) return;
+        if (!m.start) {
+          const title = typeof m.title === 'string' ? m.title.trim().slice(0, 200) : '';
+          if (title) store.add('epics', { projectId: project.id, title });
+          break;
+        }
+        const { agents: defs, roles } = factory.detectedRoles(project);
+        try { await factory.create(project, parseEpicInput(m, defs, roles)); }
+        catch (e: any) { return vscode.window.showErrorMessage(e.message); }
+        break;
+      }
+      case 'factoryGate': {
+        const e = b.epics.find(e => e.id === m.epicId);
+        const d = e && gateDecision(m);
+        if (!e || !d) return log.appendLine(`factoryGate rejected: ${JSON.stringify(m)}`);
+        if (d.decision === 'reject' || d.decision === 'cancel') {
+          const ok = await vscode.window.showWarningMessage(`Cancel the factory run for "${e.title}"?`, { modal: true,
+            detail: 'Running sessions finish on their own; branches and worktrees are kept.' }, 'Cancel epic');
+          if (!ok) return;
+        }
+        if (d.decision === 'skipStory') {
+          const ok = await vscode.window.showWarningMessage('Mark this story done without passing review?', { modal: true }, 'Skip story');
+          if (!ok) return;
+        }
+        return factory.decide(e.id, d);
+      }
+      case 'openPlan': if (b.epics.some(e => e.id === m.epicId)) factory.openPlan(m.epicId, m.source === true); return;
+      case 'attachEpic': {
+        // Only sessions this epic's factory started (planning stage, builders/reviewers, sprint review/fix).
+        const e = b.epics.find(e => e.id === m.epicId);
+        const project = e && b.projects.find(p => p.id === e.projectId);
+        if (!e || !project) return;
+        const own = [e.stageSessionId, ...b.stories.filter(s => s.epicId === e.id).flatMap(s => [s.builderSessionId, s.reviewerSessionId]),
+          ...b.sprints.filter(s => s.epicId === e.id).map(s => s.sessionId)];
+        const sid = typeof m.sessionId === 'string' ? m.sessionId : e.stageSessionId;
+        const a = sid && own.includes(sid) ? agents.agents[sid] : undefined;
+        if (a) attach(project, a.id);
+        return;
       }
       case 'addProject': return vscode.commands.executeCommand('lexCode.addProject');
       case 'removeProject': {

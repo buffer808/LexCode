@@ -97,6 +97,55 @@ Then say "sync tasks to LexCode" or run `/lexcode-sync` in any tracked project.
 
 All commands are also available from the Command Palette under `LexCode:`.
 
+### Software factory (preview)
+
+Adding an epic starts an automated planning pipeline. It runs in the background with `claude --bg`, read-only in plan mode:
+
+1. **Plan:** an orchestrator breaks the epic into sprints and stories, with dependencies and parallel-safe flags.
+2. **Revalidate:** the plan is checked against the code. Existing code is reused, dependencies are confirmed, and affected files are listed.
+3. **Security check:** findings are rated low, medium or high per sprint.
+4. **Your approval:** the epic strip on the dashboard (or a notification) offers **View plan**, **Approve plan**, **Request changes** (sent back to the orchestrator) and **Reject**. Approving adds the sprints and stories to the board in TODO.
+
+After approval, set the number of **Builders** and click **▶ Start build**. LexCode then:
+
+1. Creates the epic branch, `lexcode/<epic>-<id>`, from the branch you were on. It is checked out in its own worktree under `.lexcode/worktrees/`, so your checkout is never switched.
+2. Starts sprints once their dependencies are merged. *Parallel-safe* sprints run side by side, up to the builder count, each on its own branch and worktree. A sequential sprint always runs alone.
+3. Works through each sprint's stories one at a time:
+   - A **builder** session implements the story and commits it. It runs in the builder mode chosen for the epic.
+   - A read-only **reviewer** checks the story's diff.
+   - A failed review goes back to the same builder session, with the issues to fix. After `maxReviewAttempts` failures the story stops and waits for you: **Retry**, **Take over** (attach) or **Skip**.
+4. Runs a **sprint review** on the whole sprint's diff once its stories are done. A failure becomes a fix session, followed by another review.
+5. Merges the sprint into the epic branch automatically, unless the merge is critical. It is critical when:
+   - the reviewer flagged it,
+   - it changes a file matching `sensitivePaths`,
+   - the plan has a medium or high security finding for that sprint, or
+   - it conflicts with the epic branch.
+
+   Critical merges wait for **Approve merge**, or **Send back** with a note for a fix session.
+6. Asks to **Create PR** when every sprint is merged. This pushes the epic branch and runs `gh pr create` against the target branch.
+
+Use **⏸ Pause** to stop new sessions from starting; running ones finish. Background runs that need a permission approval show **⚠ Approve…**.
+
+- **Creating a factory epic:** use **+ Epic** on the dashboard or **LexCode: New Epic**. You choose:
+  - the builder mode: *Accept edits* or *Full auto*;
+  - the PR target branch;
+  - the agent for each role;
+  - optionally, the model and effort for each role.
+- **Existing epics:** run **Run Software Factory on Epic** from an epic's context menu.
+- **Your own agents:** agents in the project's (or your) `.claude/agents/` are used for matching roles, matched by name: *orchestrator/planner/architect/lead*, *validator/analyst*, *security/audit*, *review/qa*, *builder/developer/engineer*. Every other agent is offered to each session as a subagent to delegate to. To map agents explicitly, add `.lexcode/factory.json` to the project:
+
+  ```json
+  { "roles": { "orchestrator": "tech-lead", "reviewer": "code-reviewer" } }
+  ```
+
+  LexCode's own prompts (`agents/` in this extension) cover any role left unmapped.
+- **Models:** planning stages default to Opus at high effort.
+- **Requirements:**
+  - The project must be a git repository.
+  - Claude Code must trust the folder: run `claude` there once.
+  - Creating PRs needs the GitHub CLI (`gh`), logged in.
+- **Where plans are stored:** `.lexcode/epics/<epicId>/plan.{json,md}`. `.lexcode/` is added to `.git/info/exclude`.
+
 ## Settings
 
 | Setting | Default | Description |
@@ -105,6 +154,13 @@ All commands are also available from the Command Palette under `LexCode:`.
 | `lexCode.backgroundPermissionMode` | `manual` | Permission mode for background runs: `manual`, `acceptEdits`, `plan`, `auto`, `bypassPermissions` (dangerous). |
 | `lexCode.tasksScanSkip` | `node_modules`, `.git`, `out`, `dist`, … | Folder names skipped when searching for `TASKS.md`. Empty list scans everything. |
 | `lexCode.claudePath` | _(auto)_ | Path to the `claude` CLI. |
+| `lexCode.factory.autoStart` | `true` | New epics start the software factory. Off: **New Epic** only creates the epic. |
+| `lexCode.factory.builderPermissionMode` | `acceptEdits` | Builder mode preselected for new factory epics: `acceptEdits` or `auto` (Full auto). |
+| `lexCode.factory.targetBranch` | `main` | Default PR target branch. |
+| `lexCode.factory.models` | planner: `opus` / `high` | Model and effort for each role (`planner`, `builder`, `reviewer`). A project agent's own frontmatter `model` overrides this setting; a model picked for the epic overrides both. |
+| `lexCode.factory.defaultWorkers` | `1` | Builders preselected when starting a build (max 8). |
+| `lexCode.factory.maxReviewAttempts` | `3` | Review failures per story or sprint before the factory asks you to step in. |
+| `lexCode.factory.sensitivePaths` | auth, migrations, CI, `package.json`, lockfiles, `.env`, `Dockerfile` | Gitignore-style globs. A sprint that changes a matching file waits for your approval before it merges. |
 
 ## Data
 

@@ -5,6 +5,8 @@ import { Store, Project, Status } from './store';
 import { BoardTree, Node } from './tree';
 import { resumeSession, openStorySession, startSession, AgentWatcher } from './claude';
 import { showDashboard } from './dashboard';
+import { FactoryRunner } from './factoryRunner';
+import { parseEpicInput, validBranch, EFFORTS } from './factory';
 import { findTasksFile, parseTasks, importInto, reviewPrompt, syncSource, syncFrom, syncSourceOf, Parsed, ParsedStory } from './importer';
 
 const statuses: Status[] = ['todo', 'doing', 'review', 'done'];
@@ -16,6 +18,8 @@ export function activate(context: vscode.ExtensionContext) {
   });
   const tree = new BoardTree(store);
   const agents = new AgentWatcher(store);
+  const factory = new FactoryRunner(store, agents, path.join(context.globalStorageUri.fsPath, 'locks'),
+    context.asAbsolutePath('agents'), () => tree.refresh());
 
   // Other windows write the same file; refresh when it changes.
   const watcher = vscode.workspace.createFileSystemWatcher(
@@ -104,16 +108,54 @@ export function activate(context: vscode.ExtensionContext) {
     else if (how === 'Pick manually') await pickAndImport(p, parsed, `Import from ${p.name}/${rel}`);
   };
 
+  // Asks how the factory should run a new epic and starts planning. existing: turn a manual epic into a factory epic.
+  const factoryEpic = async (p: Project, title: string, existingId?: string) => {
+    const cfg = vscode.workspace.getConfiguration('lexCode.factory');
+    const modes = [
+      { label: '$(shield) Accept edits', detail: 'Builders auto-approve file edits and pause for shell command approvals', mode: 'acceptEdits' },
+      { label: '$(rocket) Full auto', detail: 'Builders run unattended (Claude Code auto mode)', mode: 'auto' },
+    ].sort((a, b) => Number(b.mode === cfg.get('builderPermissionMode')) - Number(a.mode === cfg.get('builderPermissionMode')));
+    const opts = { ignoreFocusOut: true };
+    const pick = await vscode.window.showQuickPick(existingId ? modes
+      : [...modes, { label: '$(layers) Manual epic', detail: 'No factory: just create the epic', mode: '' }],
+      { ...opts, placeHolder: `${title}: how should builder agents run?` });
+    if (!pick) return;
+    if (!pick.mode) return store.add('epics', { projectId: p.id, title });
+    const description = await vscode.window.showInputBox({ ...opts, prompt: `Describe "${title}" for the orchestrator: goal, constraints, acceptance criteria` });
+    if (description === undefined) return;
+    const targetBranch = await vscode.window.showInputBox({ ...opts, prompt: 'Pull request target branch', value: cfg.get('targetBranch', 'main'),
+      validateInput: v => validBranch(v.trim()) ? undefined : 'Not a valid branch name' });
+    if (targetBranch === undefined) return;
+    const { agents: defs, roles } = factory.detectedRoles(p);
+    const models: Record<string, { model?: string; effort?: string }> = {};
+    const custom = await vscode.window.showQuickPick([
+      { label: 'Default models', detail: 'Planner: Opus, high effort. Builder and reviewer: settings or Claude default', custom: false },
+      { label: 'Customize models…', detail: 'Pick model and effort per role', custom: true }], { ...opts, placeHolder: 'Models' });
+    if (!custom) return;
+    if (custom.custom) for (const role of ['planner', 'builder', 'reviewer']) {
+      const model = await vscode.window.showQuickPick(['(default)', 'opus', 'sonnet', 'haiku', 'fable'], { ...opts, placeHolder: `${role} model` });
+      if (!model) return;
+      const effort = await vscode.window.showQuickPick(['(default)', ...EFFORTS], { ...opts, placeHolder: `${role} effort` });
+      if (!effort) return;
+      models[role] = { model: model === '(default)' ? undefined : model, effort: effort === '(default)' ? undefined : effort };
+    }
+    let epic;
+    try { epic = await factory.create(p, parseEpicInput({ title, description, targetBranch, builderMode: pick.mode, models }, defs, roles), existingId); }
+    catch (e: any) { return vscode.window.showErrorMessage(e.message); }
+    const lead = epic.roleAgents?.orchestrator;
+    vscode.window.showInformationMessage(`Planning "${title}" with ${lead ? `your ${lead} agent` : 'the LexCode orchestrator'}. You'll be asked to approve the plan.`);
+  };
+
   const cmd = (id: string, fn: (...args: any[]) => unknown) =>
     vscode.commands.registerCommand(id, async (...args) => { await fn(...args); tree.refresh(); });
 
   context.subscriptions.push(
-    watcher, agents,
+    watcher, agents, factory,
     vscode.window.createTreeView('lexCode.board', { treeDataProvider: tree }),
 
     cmd('lexCode.refresh', () => {}),
 
-    vscode.commands.registerCommand('lexCode.dashboard', () => showDashboard(context, store, tree, agents)),
+    vscode.commands.registerCommand('lexCode.dashboard', () => showDashboard(context, store, tree, agents, factory)),
 
     cmd('lexCode.addProject', async () => {
       const picked = await vscode.window.showOpenDialog({ canSelectFolders: true, canSelectFiles: false, canSelectMany: true });
@@ -169,8 +211,22 @@ export function activate(context: vscode.ExtensionContext) {
 
     cmd('lexCode.newEpic', async (node?: Node) => {
       const p = await pickProject(node);
-      const title = p && await vscode.window.showInputBox({ prompt: `New epic in ${p.name}` });
-      if (p && title) store.add('epics', { projectId: p.id, title });
+      const title = p && (await vscode.window.showInputBox({ prompt: `New epic in ${p.name}` }))?.trim();
+      if (!p || !title) return;
+      if (vscode.workspace.getConfiguration('lexCode.factory').get('autoStart', true)) await factoryEpic(p, title);
+      else store.add('epics', { projectId: p.id, title });
+    }),
+
+    vscode.commands.registerCommand('lexCode.openPlan', (node?: Node) => {
+      if (node?.kind === 'epic' && node.epic) return factory.openPlan(node.epic.id);
+    }),
+
+    cmd('lexCode.runFactory', async (node?: Node) => {
+      if (node?.kind !== 'epic' || !node.epic) return;
+      if (node.epic.stage && !['cancelled', 'failed'].includes(node.epic.stage)) {
+        return vscode.window.showInformationMessage(`"${node.epic.title}" is already a factory epic (${node.epic.stage}).`);
+      }
+      await factoryEpic(node.project, node.epic.title, node.epic.id);
     }),
 
     cmd('lexCode.newSprint', async (node?: Node) => {
@@ -186,7 +242,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     cmd('lexCode.startSprint', (node: Node) => {
       if (node.kind !== 'sprint' || !node.sprint) return;
-      for (const s of store.all().sprints.filter(s => s.projectId === node.project.id)) {
+      for (const s of store.all().sprints.filter(s => s.projectId === node.project.id && !s.epicId)) {
         store.update('sprints', s.id, { active: s.id === node.sprint.id });
       }
     }),

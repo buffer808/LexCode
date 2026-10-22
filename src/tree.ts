@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { Store, Project, Epic, Sprint, Story } from './store';
 import { listSessions, Session } from './sessions';
+import { STAGE_LABEL } from './factory';
 
 // epic undefined = "No epic" group; sprint undefined = backlog.
 export type Node =
@@ -39,10 +40,11 @@ export class BoardTree implements vscode.TreeDataProvider<Node> {
       // Sprints are project-wide; show one under an epic if it holds that epic's stories,
       // is active, or is still empty (so "+ story" there sets both epic and sprint).
       const live = b.stories.filter(s => s.projectId === node.project.id && !s.archived);
-      const sprints = b.sprints.filter(sp => sp.projectId === node.project.id && (sp.active
+      // Factory sprints belong to one epic and only show there.
+      const sprints = b.sprints.filter(sp => sp.projectId === node.project.id && (sp.epicId ? sp.epicId === node.epic?.id : sp.active
         || live.some(s => s.sprintId === sp.id && s.epicId === node.epic?.id)
         || !live.some(s => s.sprintId === sp.id)))
-        .sort((x, y) => Number(y.active) - Number(x.active));
+        .sort((x, y) => Number(y.active) - Number(x.active) || (x.order ?? 0) - (y.order ?? 0));
       return [...sprints.map(sprint => ({ kind: 'sprint' as const, project: node.project, epic: node.epic, sprint })),
         { kind: 'sprint', project: node.project, epic: node.epic }];
     }
@@ -70,7 +72,9 @@ export class BoardTree implements vscode.TreeDataProvider<Node> {
     if (node.kind === 'epic') {
       const item = new vscode.TreeItem(node.epic ? `Epic: ${node.epic.title}` : 'No epic', C.Expanded);
       const n = b.stories.filter(s => s.projectId === node.project.id && s.epicId === node.epic?.id);
-      item.description = `${n.filter(s => s.status === 'done').length}/${n.length} done`;
+      const stage = node.epic?.stage && STAGE_LABEL[node.epic.stage];
+      item.description = `${stage ? `${stage}${node.epic!.error ? ' ⚠' : ''} · ` : ''}${n.filter(s => s.status === 'done').length}/${n.length} done`;
+      if (node.epic?.error) item.tooltip = node.epic.error;
       item.iconPath = new vscode.ThemeIcon(node.epic ? 'layers' : 'layers-dot');
       item.contextValue = node.epic ? 'epic' : 'noEpic';
       return item;

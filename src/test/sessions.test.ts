@@ -3,7 +3,7 @@ import * as assert from 'node:assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { listSessions, sessionDir, sessionTitle, sessionExists, editedFiles } from '../sessions';
+import { listSessions, sessionDir, sessionTitle, sessionExists, editedFiles, finalMessage } from '../sessions';
 
 const rec = (o: object) => JSON.stringify(o);
 
@@ -48,4 +48,32 @@ test('editedFiles aggregates successful edits across sessions', () => {
   const r = editedFiles('/p', ['s1', 's2', 'missing'], home);
   assert.deepEqual(r.map(e => [e.file, e.edits, e.sessionIds]), [['/p/a.ts', 2, ['s1', 's2']]]);
   assert.equal(r[0].last, Date.parse('2026-01-03T00:00:00Z'));
+});
+
+test('finalMessage returns last main-thread assistant text', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lex-home-'));
+  const dir = sessionDir('/p', home);
+  fs.mkdirSync(dir, { recursive: true });
+  const say = (content: unknown, extra = {}) => rec({ type: 'assistant', message: { content }, ...extra });
+  fs.writeFileSync(path.join(dir, 's.jsonl'), [
+    say([{ type: 'text', text: 'first' }]),
+    say([{ type: 'text', text: 'plan:' }, { type: 'text', text: '```json\n{}\n```' }]),
+    say([{ type: 'text', text: 'subagent chatter' }], { isSidechain: true }),
+    say([{ type: 'tool_use', id: 'x', name: 'Read', input: {} }]), // no text: skipped
+    '{"partial',
+  ].join('\n'));
+  assert.equal(finalMessage('/p', 's', home), 'plan:\n```json\n{}\n```');
+  assert.equal(finalMessage('/p', 'missing', home), undefined);
+});
+
+test('finalMessage since: ignores replies older than the current run', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lex-home-'));
+  const dir = sessionDir('/p', home);
+  fs.mkdirSync(dir, { recursive: true });
+  const say = (text: string, ts: string) => rec({ type: 'assistant', timestamp: ts, message: { content: [{ type: 'text', text }] } });
+  fs.writeFileSync(path.join(dir, 's.jsonl'), say('old', '2026-01-01T00:00:00Z'));
+  const since = Date.parse('2026-01-02T00:00:00Z');
+  assert.equal(finalMessage('/p', 's', home, since), undefined);
+  fs.appendFileSync(path.join(dir, 's.jsonl'), '\n' + say('new', '2026-01-03T00:00:00Z'));
+  assert.equal(finalMessage('/p', 's', home, since), 'new');
 });

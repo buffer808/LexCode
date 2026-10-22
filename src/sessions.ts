@@ -39,6 +39,24 @@ export function listSessions(projectPath: string, home?: string): Session[] {
 export const sessionExists = (projectPath: string, id: string, home?: string) =>
   fs.existsSync(path.join(sessionDir(projectPath, home), id + '.jsonl'));
 
+// Text of the session's last assistant message (how read-only factory stages hand back their JSON result).
+// since: ignore messages older than this (ms), so a resumed session's previous reply isn't mistaken for the new one.
+export function finalMessage(projectPath: string, sessionId: string, home?: string, since = 0): string | undefined {
+  let text: string;
+  try { text = fs.readFileSync(path.join(sessionDir(projectPath, home), sessionId + '.jsonl'), 'utf8'); } catch { return; }
+  let last: string | undefined;
+  for (const line of text.split('\n')) {
+    let r: any;
+    try { r = JSON.parse(line); } catch { continue; }
+    if (r.type !== 'assistant' || r.isSidechain) continue; // sidechain = subagent transcript
+    if (since && !(Date.parse(r.timestamp) >= since)) continue;
+    const c = r.message?.content;
+    const t = typeof c === 'string' ? c : Array.isArray(c) ? c.filter((x: any) => x.type === 'text').map((x: any) => x.text).join('\n') : '';
+    if (t.trim()) last = t;
+  }
+  return last;
+}
+
 export interface FileEdit { file: string; edits: number; last: number; sessionIds: string[] }
 
 const EDIT_TOOLS: Record<string, string> = { Edit: 'file_path', MultiEdit: 'file_path', Write: 'file_path', NotebookEdit: 'notebook_path' };
