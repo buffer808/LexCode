@@ -34,10 +34,16 @@ export async function startSession(project: Project, prompt: string) {
   else terminal(project, shellQuote(prompt));
 }
 
-const storyPrompt = (s: Story) => [s.title, s.description].filter(Boolean).join('\n\n');
+// attachDir: the story's attachments folder (Store.attachmentsDir(story.id)); it sits outside the project, hence --add-dir.
+function storyPrompt(s: Story, attachDir: string) {
+  const files = [...(s.refs ?? []), ...(s.attachments ?? []).map(a => path.join(attachDir, a.file))];
+  return [s.title, s.description, files.length && `Related files (read them first):\n${files.map(f => `- ${f}`).join('\n')}`]
+    .filter(Boolean).join('\n\n');
+}
+const addDir = (s: Story, attachDir: string) => s.attachments?.length ? ['--add-dir', attachDir] : [];
 
 // Resumes the story's latest live session, or starts one. Returns the session id to link.
-export async function openStorySession(project: Project, story: Story, forceNew = false): Promise<string | undefined> {
+export async function openStorySession(project: Project, story: Story, attachDir: string, forceNew = false): Promise<string | undefined> {
   const latest = [...(story.sessionIds ?? [])].reverse().find(id => sessionExists(project.path, id));
   if (latest && !forceNew) {
     await resumeSession(project, latest);
@@ -45,13 +51,13 @@ export async function openStorySession(project: Project, story: Story, forceNew 
   }
   if (!useExtension()) {
     const id = randomUUID();
-    terminal(project, `--session-id ${id} ${shellQuote(storyPrompt(story))}`);
+    terminal(project, [...addDir(story, attachDir), '--session-id', id, storyPrompt(story, attachDir)].map(shellQuote).join(' '));
     return id;
   }
   // Extension can't take a session id up front: watch the project's session dir for the new file.
   // ponytail: assumes the extension runs in project.path (first/only workspace folder); else link is missed.
   const before = new Set(listSessions(project.path).map(s => s.id));
-  await vscode.commands.executeCommand(EXT_OPEN, undefined, storyPrompt(story));
+  await vscode.commands.executeCommand(EXT_OPEN, undefined, storyPrompt(story, attachDir));
   for (let i = 0; i < 60; i++) {
     await new Promise(r => setTimeout(r, 2000));
     const fresh = listSessions(project.path).find(s => !before.has(s.id));
@@ -83,10 +89,10 @@ const run = promisify(execFile);
 
 // Starts a new background session for the story, or continues `sessionId` with `followUp`.
 // Returns the real session id: --bg picks its own id (it ignores --session-id), printed as "backgrounded · <short id>".
-export async function runInBackground(project: Project, story: Story, mode: string, sessionId?: string, followUp?: string) {
+export async function runInBackground(project: Project, story: Story, attachDir: string, mode: string, sessionId?: string, followUp?: string) {
   if (!(mode in PERMISSION_MODES)) throw new Error(`Unknown permission mode ${mode}`);
-  const args = ['--bg', '--permission-mode', mode, ...(sessionId ? ['--resume', sessionId] : []),
-    sessionId ? followUp ?? 'Continue.' : storyPrompt(story)];
+  const args = ['--bg', '--permission-mode', mode, ...addDir(story, attachDir), ...(sessionId ? ['--resume', sessionId] : []),
+    sessionId ? followUp ?? 'Continue.' : storyPrompt(story, attachDir)];
   let stdout: string;
   try {
     ({ stdout } = await run(claudeBin(), args, { cwd: project.path, timeout: 60000 }));

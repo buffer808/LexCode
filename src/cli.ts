@@ -1,5 +1,5 @@
 // Headless TASKS.md -> board sync, for Claude skills and scripts:
-//   node out/cli.js sync [projectPath] [--dry-run]
+//   node out/cli.js sync [projectPath] [--dry-run] [--epic <name>]
 // Board file: $LEXCODE_BOARD, else the first existing VS Code-family globalStorage copy.
 import * as fs from 'fs';
 import * as os from 'os';
@@ -21,9 +21,12 @@ function boardFile(): string {
 
 function main(argv: string[]) {
   const [cmd, ...rest] = argv;
-  if (cmd !== 'sync') throw new Error('usage: lexcode sync [projectPath] [--dry-run]');
+  if (cmd !== 'sync') throw new Error('usage: lexcode sync [projectPath] [--dry-run] [--epic <name>]');
   const dryRun = rest.includes('--dry-run');
-  const dir = path.resolve(rest.find(a => !a.startsWith('--')) ?? process.cwd());
+  const ei = rest.indexOf('--epic');
+  const epic = ei >= 0 ? rest[ei + 1] : undefined;
+  if (ei >= 0 && !epic) throw new Error('--epic needs a name');
+  const dir = path.resolve(rest.find((a, i) => !a.startsWith('--') && rest[i - 1] !== '--epic') ?? process.cwd());
   const file = boardFile();
   // Same write-back as the extension: status changes tick the source checkbox.
   const store = new Store(file, s => { if (s.source) syncSource(s); });
@@ -34,8 +37,8 @@ function main(argv: string[]) {
   if (!p) throw new Error(`${dir} is not a LexCode project (board: ${file})`);
   const src = syncSourceOf(p.path);
   if (!src) throw new Error(`No TASKS.md in ${p.path}`);
-  const r = syncFrom(store, p.id, src.parsed, dryRun);
-  console.log(`${dryRun ? '[dry run] ' : ''}${p.name}: ${path.relative(p.path, src.file)} -> ${file}`);
+  const r = syncFrom(store, p.id, src.parsed, { dryRun, epic });
+  console.log(`${dryRun ? '[dry run] ' : ''}${p.name}${epic ? ` (epic ${epic})` : ''}: ${path.relative(p.path, src.file)} -> ${file}`);
   for (const [k, xs] of Object.entries(r)) for (const x of xs) console.log(`${k}\t${x}`);
   if (!r.added.length && !r.updated.length && !r.archived.length) console.log('in sync');
 }

@@ -1,6 +1,6 @@
 ---
 name: lexcode-sync
-description: Sync the current project's TASKS.md into its LexCode board record (status changes, new tasks, renames, removed tasks get archived). Use when the user says "sync tasks", "sync TASKS.md to LexCode", "update LexCode from tasks", "/lexcode-sync", or after editing TASKS.md in a project tracked by the LexCode VS Code extension.
+description: Sync the current project's TASKS.md into its LexCode board record (status changes, new tasks, renames, removed tasks get archived), for the whole project or one epic. Use when the user says "sync tasks", "sync TASKS.md to LexCode", "update LexCode from tasks", "sync the X epic", "/lexcode-sync", or after editing TASKS.md in a project tracked by the LexCode VS Code extension.
 ---
 
 # LexCode sync
@@ -22,6 +22,8 @@ Pushes TASKS.md edits into the LexCode board (`board.json`) using the extension'
    ```sh
    node "$LEX" sync --dry-run
    ```
+
+   To sync one epic only (user names an epic, e.g. "sync the Auth epic"), add `--epic "<name>"` (case-insensitive) to this and step 4. Only stories under that epic, in the markdown or on the board, are touched; stories moved in or out of it are included. Unknown name → `No epic "<name>"`: list the `## Epic:` headings from the task file and ask which one.
 
    Output lines are `added|updated|archived<TAB>title`. Show them as a short table. "in sync" → say so, stop.
    Errors: "not a LexCode project" → the folder isn't added to LexCode (Board → `+`). "board.json not found" → set `LEXCODE_BOARD` to the file path.

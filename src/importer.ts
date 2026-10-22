@@ -145,7 +145,8 @@ export interface SyncResult { added: string[]; updated: string[]; archived: stri
 // Matched: status/epic/sprint/description/source follow the markdown ("doing" keeps a board "review").
 // Unmatched open items are added; imported stories (with a source) no longer in the markdown are archived.
 // Stories created on the board (no source) are never touched. dryRun: report only.
-export function syncFrom(store: Store, projectId: string, parsed: Parsed, dryRun = false): SyncResult {
+// epic: only touch stories under that epic in the markdown or on the board (moves in/out of it included).
+export function syncFrom(store: Store, projectId: string, parsed: Parsed, { dryRun = false, epic }: { dryRun?: boolean; epic?: string } = {}): SyncResult {
   store.reload();
   const b = store.all();
   const key = (s: string) => s.toLowerCase();
@@ -157,6 +158,10 @@ export function syncFrom(store: Store, projectId: string, parsed: Parsed, dryRun
   const bySource = new Map(mine.filter(s => s.source).map(s => [at(s.source), s]));
   const matched = new Set<string>();
   const r: SyncResult = { added: [], updated: [], archived: [] };
+  const all = [...parsed.stories.map(p => [p, false] as const), ...(parsed.done ?? []).map(p => [p, true] as const)];
+  const target = epic && epics.get(key(epic));
+  if (epic && !target && !all.some(([p]) => p.epic && key(p.epic) === key(epic))) throw new Error(`No epic "${epic}"`);
+  const inEpic = (p: ParsedStory, s?: Story) => !epic || !!p.epic && key(p.epic) === key(epic) || !!target && s?.epicId === target;
 
   const epicId = (t?: string) => {
     if (!t) return undefined;
@@ -169,9 +174,10 @@ export function syncFrom(store: Store, projectId: string, parsed: Parsed, dryRun
     return sprints.get(key(t));
   };
 
-  for (const [p, closed] of [...parsed.stories.map(p => [p, false] as const), ...(parsed.done ?? []).map(p => [p, true] as const)]) {
+  for (const [p, closed] of all) {
     let s = byTitle.get(key(p.title));
     if (!s || matched.has(s.id)) { const t = bySource.get(at(p.source)); s = t && !matched.has(t.id) ? t : undefined; }
+    if (!inEpic(p, s)) { if (s) matched.add(s.id); continue; }
     if (!s) {
       if (closed || byTitle.has(key(p.title))) continue;
       r.added.push(p.title);
@@ -195,7 +201,7 @@ export function syncFrom(store: Store, projectId: string, parsed: Parsed, dryRun
   }
 
   for (const s of mine) {
-    if (!s.source || s.archived || matched.has(s.id)) continue;
+    if (!s.source || s.archived || matched.has(s.id) || epic && s.epicId !== target) continue;
     r.archived.push(s.title);
     if (!dryRun) store.update('stories', s.id, { archived: true });
   }

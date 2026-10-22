@@ -73,14 +73,14 @@ You then choose **Review with Claude** — Claude checks the tasks against the c
 
 ### Sync from TASKS.md
 
-After import, keep editing TASKS.md and run **Sync from TASKS.md** (project context menu) to push the changes to the board: ticked items become `done`, `[~]` becomes `doing`, new items are added, renamed lines are matched by position, and items removed from the markdown are archived. Stories created on the board are never touched.
+After import, keep editing TASKS.md and run **Sync from TASKS.md** (project context menu) to push the changes to the board: ticked items become `done`, `[~]` becomes `doing`, new items are added, renamed lines are matched by position, and items removed from the markdown are archived. Stories created on the board are never touched. Pick an epic to sync only that epic (`--epic` on the CLI).
 
 If the project was imported with **Review with Claude**, sync reads `.lexcode/import.md` instead and checks each story's original line (via its `src` comment), so work Claude weeded out isn't re-added. Items added to TASKS.md after the review need another review import.
 
 The same sync runs headless, for Claude Code or scripts:
 
 ```sh
-node ~/.vscode/extensions/lex.lex-code-0.0.3/out/cli.js sync [projectPath] [--dry-run]
+node ~/.vscode/extensions/lex.lex-code-0.0.3/out/cli.js sync [projectPath] [--dry-run] [--epic <name>]
 ```
 
 It finds `board.json` in your editor's global storage (override with `LEXCODE_BOARD`).

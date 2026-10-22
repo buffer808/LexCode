@@ -134,8 +134,14 @@ export function activate(context: vscode.ExtensionContext) {
       if (!p) return;
       const src = syncSourceOf(p.path, vscode.workspace.getConfiguration('lexCode').get<string[]>('tasksScanSkip'));
       if (!src) return vscode.window.showInformationMessage(`No TASKS.md found in ${p.name}`);
-      const r = syncFrom(store, p.id, src.parsed);
-      vscode.window.showInformationMessage(`${p.name}: ${r.added.length} added, ${r.updated.length} updated, ${r.archived.length} archived from ${path.relative(p.path, src.file)}`);
+      // Epic scope: every epic on the board or in the markdown.
+      const epics = [...new Set([...store.all().epics.filter(e => e.projectId === p.id).map(e => e.title), ...src.parsed.epics])];
+      const all = '$(layers) All epics';
+      const pick = epics.length ? await vscode.window.showQuickPick([all, ...epics], { placeHolder: 'Sync which epic?' }) : all;
+      if (!pick) return;
+      const epic = pick === all ? undefined : pick;
+      const r = syncFrom(store, p.id, src.parsed, { epic });
+      vscode.window.showInformationMessage(`${p.name}${epic ? ` (${epic})` : ''}: ${r.added.length} added, ${r.updated.length} updated, ${r.archived.length} archived from ${path.relative(p.path, src.file)}`);
     }),
 
     cmd('lexCode.removeProject', async (node?: Node) => {
@@ -231,7 +237,7 @@ export function activate(context: vscode.ExtensionContext) {
       if (node.kind !== 'story') return;
       const project = store.all().projects.find(p => p.id === node.story.projectId);
       if (!project) return;
-      const sessionId = await openStorySession(project, node.story, forceNew);
+      const sessionId = await openStorySession(project, node.story, store.attachmentsDir(node.story.id), forceNew);
       if (!sessionId) return;
       // Re-read: the extension path polls for up to 2 min while the story may have changed.
       store.reload();

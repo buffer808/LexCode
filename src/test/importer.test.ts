@@ -94,7 +94,7 @@ test('syncFrom follows TASKS.md edits: status, new, renamed, removed', () => {
   store.update('stories', store.all().stories.find(s => s.title === 'D')!.id, { status: 'review' });
 
   fs.writeFileSync(f, '## Sprint 1\n- [x] A\n- [~] B renamed\n- [~] D\n## Sprint 2\n- [ ] E\n');
-  const dry = syncFrom(store, p.id, parseTasks(f), true);
+  const dry = syncFrom(store, p.id, parseTasks(f), { dryRun: true });
   assert.deepEqual(dry.added, ['E']);
   assert.equal(store.all().stories.find(s => s.title === 'A')!.status, 'todo'); // dry run wrote nothing
 
@@ -129,4 +129,24 @@ test('after a reviewed import, sync reads .lexcode/import.md and checks the orig
   assert.equal(by('Keep')!.status, 'done');
   assert.equal(by('Also keep')!.status, 'doing');
   assert.equal(by('Weeded out'), undefined);
+});
+
+test('syncFrom with epic only touches that epic', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lex-epic-'));
+  const f = path.join(root, 'TASKS.md');
+  fs.writeFileSync(f, '## Epic: Auth\n- [ ] Login\n- [ ] Logout\n## Epic: Billing\n- [ ] Invoice\n- [ ] Refund\n');
+  const store = new Store(path.join(root, 'board.json'));
+  const p = store.add('projects', { name: 'x', path: root });
+  importInto(store, p.id, parseTasks(f));
+
+  // Fresh lines for Signup: landing on Logout's old line would read as a rename.
+  fs.writeFileSync(f, '## Epic: Billing\n- [x] Invoice\n\n\n\n## Epic: Auth\n- [x] Login\n- [ ] Refund\n- [ ] Signup\n');
+  assert.throws(() => syncFrom(store, p.id, parseTasks(f), { epic: 'Nope' }), /No epic/);
+  const r = syncFrom(store, p.id, parseTasks(f), { epic: 'auth' });
+  assert.deepEqual(r.added, ['Signup']);
+  assert.deepEqual(r.archived, ['Logout']);
+  assert.ok(r.updated.some(u => u.startsWith('Refund'))); // moved into Auth
+  const by = (t: string) => store.all().stories.find(s => s.title === t)!;
+  assert.equal(by('Login').status, 'done');
+  assert.equal(by('Invoice').status, 'todo'); // Billing untouched
 });

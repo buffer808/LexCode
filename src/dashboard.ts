@@ -103,7 +103,7 @@ export function showDashboard(context: vscode.ExtensionContext, store: Store, tr
         starting.add(story.id);
         push();
         let id: string | undefined;
-        try { id = await runInBackground(project, story, m.mode, sessionId, followUp); }
+        try { id = await runInBackground(project, story, store.attachmentsDir(story.id), m.mode, sessionId, followUp); }
         finally { starting.delete(story.id); push(); }
         if (!id) return;
         store.reload();
