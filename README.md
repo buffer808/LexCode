@@ -16,19 +16,19 @@ When the tool that kept all those projects, sprints and sessions in one place ne
 npm install
 npm run compile
 npx @vscode/vsce package
-code --install-extension lex-code-0.0.3.vsix
+code --install-extension lex-code-0.0.4.vsix
 ```
 
 Or press F5 in VS Code to try it in an Extension Development Host.
 
 ### Manual install (after compile)
 
-Once `npx @vscode/vsce package` has produced `lex-code-0.0.3.vsix` in the project root:
+Once `npx @vscode/vsce package` has produced `lex-code-0.0.4.vsix` in the project root:
 
 1. Open the **Extensions** view (`Cmd+Shift+X` / `Ctrl+Shift+X`).
 2. Click the **`…`** (Views and More Actions) menu at the top of the view.
 3. Choose **Install from VSIX…**.
-4. Select `lex-code-0.0.3.vsix` and reload the window when prompted.
+4. Select `lex-code-0.0.4.vsix` and reload the window when prompted.
 
 Alternatively, run **Extensions: Install from VSIX…** from the Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`).
 
@@ -36,9 +36,9 @@ Alternatively, run **Extensions: Install from VSIX…** from the Command Palette
 
 Devin's editor is VS Code-based, so it installs the same `.vsix`:
 
-1. Build the package as above (or copy `lex-code-0.0.3.vsix` into the Devin workspace).
+1. Build the package as above (or copy `lex-code-0.0.4.vsix` into the Devin workspace).
 2. In Devin's editor, open the **Extensions** view → **`…`** menu → **Install from VSIX…**, and pick the file.
-   - Or from Devin's terminal: `code --install-extension lex-code-0.0.3.vsix`
+   - Or from Devin's terminal: `code --install-extension lex-code-0.0.4.vsix`
 3. Reload the window; the **LexCode** icon appears in the activity bar.
 
 Background runs and the sparkle action need the `claude` CLI available in Devin's environment (set `lexCode.claudePath` if it isn't on `PATH`).
@@ -80,7 +80,7 @@ If the project was imported with **Review with Claude**, sync reads `.lexcode/im
 The same sync runs headless, for Claude Code or scripts:
 
 ```sh
-node ~/.vscode/extensions/lex.lex-code-0.0.3/out/cli.js sync [projectPath] [--dry-run] [--epic <name>]
+node ~/.vscode/extensions/lex.lex-code-0.0.4/out/cli.js sync [projectPath] [--dry-run] [--epic <name>]
 ```
 
 It finds `board.json` in your editor's global storage (override with `LEXCODE_BOARD`).
