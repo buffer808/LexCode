@@ -7,7 +7,7 @@ let edits = { id: null, files: null }; // edited-files log for the open story, f
 // Selection survives webview reloads.
 // sprintId: null = backlog, ALL = every sprint. epicId: null = all epics, NONE = no epic.
 const ALL = '*', NONE = '-';
-let sel = { projectId: null, sprintId: null, epicId: null, ...vscode.getState() };
+let sel = { projectId: null, sprintId: null, epicId: null, showArchived: false, ...vscode.getState() };
 
 // Tiny DOM builder; text always via textContent (no innerHTML → no injection).
 function h(tag, props, ...kids) {
@@ -34,7 +34,7 @@ function fill(frac) {
 }
 
 function select(projectId, sprintId, epicId = null) {
-  sel = { projectId, sprintId, epicId };
+  sel = { projectId, sprintId, epicId, showArchived: sel.showArchived };
   vscode.setState(sel);
   render();
 }
@@ -67,7 +67,7 @@ function render() {
   // With an epic picked, only offer sprints holding its stories (plus the current one, so the select never lies).
   const projSprints = sprints.filter(sp => sp.projectId === project.id && (sel.epicId === null || sp.id === sel.sprintId
     || stories.some(s => s.sprintId === sp.id && epicMatch(s))));
-  const picker = h('select', { onchange: e => select(project.id, e.target.value || null) },
+  const picker = h('select', { onchange: e => select(project.id, e.target.value || null, sel.epicId) },
     h('option', { value: '' }, 'Backlog'),
     h('option', { value: ALL, selected: sel.sprintId === ALL }, 'All sprints'),
     projSprints.map(s => h('option', { value: s.id, selected: s.id === sel.sprintId }, s.name + (s.active ? ' (active)' : ''))));
@@ -79,6 +79,8 @@ function render() {
     projEpics.map(e => h('option', { value: e.id, selected: e.id === sel.epicId }, e.title)));
 
   app.append(h('h2', { class: 'project' }, project.name), h('header', {}, picker, projEpics.length ? epicFilter : null, h('span', { class: 'spacer' }),
+    h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: sel.showArchived,
+      onchange: e => { sel.showArchived = e.target.checked; vscode.setState(sel); render(); } }), 'Show archived'),
     h('button', { onclick: () => vscode.postMessage({ type: 'openProject', id: project.id }) }, 'Open in workspace'),
     h('button', { onclick: () => vscode.postMessage({ type: 'importTasks', id: project.id }) }, 'Import tasks'),
     h('button', { onclick: () => vscode.postMessage({ type: 'removeProject', id: project.id }) }, 'Remove project')));
@@ -102,7 +104,7 @@ function render() {
 
   const inView = stories.filter(s => s.projectId === project.id
     && (sel.sprintId === ALL || (s.sprintId ?? null) === sel.sprintId)
-    && epicMatch(s));
+    && epicMatch(s) && (sel.showArchived || !s.archived));
   app.append(h('section', { class: 'kanban' }, STATUSES.map(status => {
     const col = h('div', { class: 'col', 'data-status': status,
       ondragover: e => { e.preventDefault(); col.classList.add('over'); },
@@ -112,13 +114,16 @@ function render() {
         col.classList.remove('over');
         vscode.postMessage({ type: 'status', id: e.dataTransfer.getData('text/plain'), status });
       } },
-      h('h3', {}, h('span', {}, status), h('span', {}, inView.filter(s => s.status === status).length)),
+      h('h3', {}, h('span', {}, status), h('span', {}, inView.filter(s => s.status === status).length,
+        status === 'done' && inView.some(s => s.status === 'done' && !s.archived) && h('button', { class: 'link', title: 'Archive all done stories in view',
+          onclick: () => vscode.postMessage({ type: 'archiveDone', ids: inView.filter(s => s.status === 'done' && !s.archived).map(s => s.id) }) }, ' · archive'))),
       !inView.some(s => s.status === status) && h('div', { class: 'none' }, 'Drop here'),
       inView.filter(s => s.status === status).map(s => {
         const epic = epics.find(e => e.id === s.epicId);
         const n = s.sessionIds?.length ?? 0;
         const blocked = (s.sessionIds ?? []).some(id => data.agents[id]?.state === 'blocked');
-        return h('div', { class: 'story' + (blocked ? ' needs' : ''), draggable: 'true', tabindex: '0', role: 'button',
+        const claude = claudeButton(s, n);
+        return h('div', { class: 'story' + (blocked ? ' needs' : '') + (s.archived ? ' archived' : ''), draggable: 'true', tabindex: '0', role: 'button',
           onclick: () => openStory(s.id), onkeydown: e => { if (e.key === 'Enter') openStory(s.id); },
           ondragstart: e => e.dataTransfer.setData('text/plain', s.id) },
           h('div', {}, s.title),
@@ -126,14 +131,18 @@ function render() {
             epic && h('span', { class: 'tag' }, epic.title),
             s.points != null && h('span', {}, `${s.points}pt`),
             s.attachments?.length > 0 && h('span', { title: 'Attachments' }, `📎${s.attachments.length}`),
-            n > 0 && h('span', {}, `${n} session${n > 1 ? 's' : ''}`)),
-          h('div', { class: 'meta' },
-            blocked && h('span', { class: 'approve', title: 'Background run needs your approval' }, '⚠ approve'),
-            h('button', { class: n ? 'claude' : 'claude start', title: n ? 'Resume latest Claude session' : 'Start Claude session',
-              onclick: e => { e.stopPropagation(); vscode.postMessage({ type: 'claude', id: s.id }); } }, n ? 'Claude ↻' : 'Claude ▶')));
+            n > 0 && h('span', {}, `${n} session${n > 1 ? 's' : ''}`),
+            !blocked && claude),
+          blocked && h('div', { class: 'meta' },
+            h('span', { class: 'approve', title: 'Background run needs your approval' }, '⚠ approve'), claude));
       }));
     return col;
   })));
+}
+
+function claudeButton(s, n) {
+  return h('button', { class: n ? 'claude' : 'claude start', title: n ? 'Resume latest Claude session' : 'Start Claude session',
+                        onclick: e => { e.stopPropagation(); vscode.postMessage({ type: 'claude', id: s.id }); } }, n ? 'Claude ↻' : 'Claude ▶');
 }
 
 /* ---------- story modal ---------- */
@@ -233,6 +242,7 @@ function renderStory() {
           : h('button', { onclick: () => send('bgRun', { mode: mode.value }) }, '⏵ Run in background')),
       unlinked.length ? select('linkSel', [['', 'Link existing session…'], ...unlinked.map(x => [x.id, x.title])], '',
         e => e.target.value && send('link', { sessionId: e.target.value })) : null),
+    h('button', { onclick: () => update({ archived: !s.archived }) }, s.archived ? 'Unarchive' : 'Archive'),
     h('button', { class: 'danger', onclick: () => send('delete') }, 'Delete story'));
 
   dialog.replaceChildren(h('div', { class: 'modal' },

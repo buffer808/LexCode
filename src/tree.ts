@@ -36,15 +36,19 @@ export class BoardTree implements vscode.TreeDataProvider<Node> {
       return [...epics, ...(hasLoose || !epics.length ? [{ kind: 'epic', project: p } as Node] : []), { kind: 'sessions', project: p }];
     }
     if (node.kind === 'epic') {
-      // Every sprint shown under every epic so "+ story" there sets both epic and sprint.
-      const sprints = b.sprints.filter(s => s.projectId === node.project.id)
+      // Sprints are project-wide; show one under an epic if it holds that epic's stories,
+      // is active, or is still empty (so "+ story" there sets both epic and sprint).
+      const live = b.stories.filter(s => s.projectId === node.project.id && !s.archived);
+      const sprints = b.sprints.filter(sp => sp.projectId === node.project.id && (sp.active
+        || live.some(s => s.sprintId === sp.id && s.epicId === node.epic?.id)
+        || !live.some(s => s.sprintId === sp.id)))
         .sort((x, y) => Number(y.active) - Number(x.active));
       return [...sprints.map(sprint => ({ kind: 'sprint' as const, project: node.project, epic: node.epic, sprint })),
         { kind: 'sprint', project: node.project, epic: node.epic }];
     }
     if (node.kind === 'sprint') {
       return b.stories
-        .filter(s => s.projectId === node.project.id && s.sprintId === node.sprint?.id && s.epicId === node.epic?.id)
+        .filter(s => s.projectId === node.project.id && s.sprintId === node.sprint?.id && s.epicId === node.epic?.id && !s.archived)
         .map(story => ({ kind: 'story', story }));
     }
     if (node.kind === 'sessions') {

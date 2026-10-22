@@ -20,6 +20,7 @@ function storyPatch(b: ReturnType<Store['all']>, story: Story, raw: any): Partia
   if (typeof raw?.title === 'string' && raw.title.trim()) patch.title = raw.title.trim();
   if (typeof raw?.description === 'string') patch.description = raw.description;
   if (STATUSES.includes(raw?.status)) patch.status = raw.status;
+  if (typeof raw?.archived === 'boolean') patch.archived = raw.archived || undefined;
   if ('points' in (raw ?? {})) patch.points = typeof raw.points === 'number' && isFinite(raw.points) ? raw.points : undefined;
   if ('sprintId' in (raw ?? {})) patch.sprintId = b.sprints.find(s => s.id === raw.sprintId && s.projectId === story.projectId)?.id;
   if ('epicId' in (raw ?? {})) patch.epicId = b.epics.find(e => e.id === raw.epicId && e.projectId === story.projectId)?.id;
@@ -64,6 +65,9 @@ export function showDashboard(context: vscode.ExtensionContext, store: Store, tr
         break;
       }
       case 'status': if (story && STATUSES.includes(m.status)) store.update('stories', story.id, { status: m.status }); break;
+      case 'archiveDone':
+        for (const s of b.stories.filter(s => Array.isArray(m.ids) && m.ids.includes(s.id) && s.status === 'done')) store.update('stories', s.id, { archived: true });
+        break;
       case 'update': if (story) store.update('stories', story.id, storyPatch(b, story, m.patch)); break;
       case 'delete': {
         if (!story) return;

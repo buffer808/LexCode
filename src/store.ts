@@ -12,6 +12,7 @@ export interface Story {
   id: string; projectId: string; title: string; status: Status;
   epicId?: string; sprintId?: string; points?: number; description?: string;
   sessionIds?: string[]; attachments?: Attachment[];
+  archived?: boolean; // hidden from board/tree unless "Show archived"
   // Imported stories: line the story came from (status is written back there) and related task files.
   source?: SourceRef; refs?: string[];
 }
