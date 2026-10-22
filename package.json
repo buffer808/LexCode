@@ -2,7 +2,7 @@
   "name": "lex-code",
   "displayName": "LexCode",
   "description": "Agile project manager for concurrent projects with Claude Code sessions",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "lex",
   "icon": "media/icon.png",
   "repository": {
@@ -109,6 +109,11 @@
         "icon": "$(cloud-download)"
       },
       {
+        "command": "lexCode.syncTasks",
+        "title": "LexCode: Sync from TASKS.md",
+        "icon": "$(sync)"
+      },
+      {
         "command": "lexCode.dashboard",
         "title": "LexCode: Open Dashboard",
         "icon": "$(dashboard)"
@@ -180,6 +185,11 @@
         },
         {
           "command": "lexCode.importTasks",
+          "when": "viewItem == project",
+          "group": "8"
+        },
+        {
+          "command": "lexCode.syncTasks",
           "when": "viewItem == project",
           "group": "8"
         },

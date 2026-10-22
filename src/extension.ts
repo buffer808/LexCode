@@ -5,7 +5,7 @@ import { Store, Project, Status } from './store';
 import { BoardTree, Node } from './tree';
 import { resumeSession, openStorySession, startSession, AgentWatcher } from './claude';
 import { showDashboard } from './dashboard';
-import { findTasksFile, parseTasks, importInto, reviewPrompt, syncSource, Parsed, ParsedStory } from './importer';
+import { findTasksFile, parseTasks, importInto, reviewPrompt, syncSource, syncFrom, syncSourceOf, Parsed, ParsedStory } from './importer';
 
 const statuses: Status[] = ['todo', 'doing', 'review', 'done'];
 
@@ -127,6 +127,15 @@ export function activate(context: vscode.ExtensionContext) {
     cmd('lexCode.importTasks', async (node?: Node) => {
       const p = await pickProject(node);
       if (p) await importTasks(p, false);
+    }),
+
+    cmd('lexCode.syncTasks', async (node?: Node) => {
+      const p = await pickProject(node);
+      if (!p) return;
+      const src = syncSourceOf(p.path, vscode.workspace.getConfiguration('lexCode').get<string[]>('tasksScanSkip'));
+      if (!src) return vscode.window.showInformationMessage(`No TASKS.md found in ${p.name}`);
+      const r = syncFrom(store, p.id, src.parsed);
+      vscode.window.showInformationMessage(`${p.name}: ${r.added.length} added, ${r.updated.length} updated, ${r.archived.length} archived from ${path.relative(p.path, src.file)}`);
     }),
 
     cmd('lexCode.removeProject', async (node?: Node) => {

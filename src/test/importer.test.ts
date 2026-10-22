@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { Store } from '../store';
-import { findTasksFile, parseTasks, importInto, syncSource } from '../importer';
+import { findTasksFile, parseTasks, importInto, syncSource, syncFrom, syncSourceOf } from '../importer';
 
 test('skip list is configurable; dot-folders scanned', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lex-skip-'));
@@ -81,4 +81,52 @@ test('stories record source + refs; status writes back to the checkbox', () => {
   const rev = parseTasks(path.join(dir, 'import.md')).stories[0];
   assert.equal(rev.title, 'Logout');
   assert.deepEqual(rev.source, { file: stories, line: 4 });
+});
+
+test('syncFrom follows TASKS.md edits: status, new, renamed, removed', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lex-sync-'));
+  const f = path.join(root, 'TASKS.md');
+  fs.writeFileSync(f, '## Sprint 1\n- [ ] A\n- [ ] B\n- [ ] C\n- [ ] D\n');
+  const store = new Store(path.join(root, 'board.json'));
+  const p = store.add('projects', { name: 'x', path: root });
+  importInto(store, p.id, parseTasks(f));
+  store.add('stories', { projectId: p.id, title: 'Board only', status: 'todo' });
+  store.update('stories', store.all().stories.find(s => s.title === 'D')!.id, { status: 'review' });
+
+  fs.writeFileSync(f, '## Sprint 1\n- [x] A\n- [~] B renamed\n- [~] D\n## Sprint 2\n- [ ] E\n');
+  const dry = syncFrom(store, p.id, parseTasks(f), true);
+  assert.deepEqual(dry.added, ['E']);
+  assert.equal(store.all().stories.find(s => s.title === 'A')!.status, 'todo'); // dry run wrote nothing
+
+  const r = syncFrom(store, p.id, parseTasks(f));
+  assert.deepEqual(r.archived, ['C']);
+  const by = (t: string) => store.all().stories.find(s => s.title === t)!;
+  assert.equal(by('A').status, 'done');
+  assert.equal(by('B renamed').status, 'doing'); // matched by line
+  assert.equal(by('D').status, 'review'); // [~] keeps review
+  assert.equal(by('E').sprintId, store.all().sprints.find(s => s.name === 'Sprint 2')!.id);
+  assert.ok(by('C').archived);
+  assert.ok(!by('Board only').archived);
+  assert.deepEqual(syncFrom(store, p.id, parseTasks(f)), { added: [], updated: [], archived: [] });
+});
+
+test('after a reviewed import, sync reads .lexcode/import.md and checks the original lines', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lex-man-'));
+  const f = path.join(root, 'TASKS.md');
+  fs.writeFileSync(f, '- [ ] Weeded out\n- [ ] Keep\n- [ ] Also keep\n- [ ] Gone\n');
+  fs.mkdirSync(path.join(root, '.lexcode'));
+  fs.writeFileSync(path.join(root, '.lexcode', 'import.md'),
+    ['Keep', 'Also keep', 'Gone'].map((t, i) => `- [ ] ${t} <!-- src: ${f}:${i + 2} -->`).join('\n'));
+  const store = new Store(path.join(root, 'board.json'));
+  const p = store.add('projects', { name: 'x', path: root });
+  importInto(store, p.id, syncSourceOf(root)!.parsed);
+
+  fs.writeFileSync(f, '- [ ] Weeded out\n- [ ] New line\n- [x] Keep\n- [~] Also keep\n');
+  const src = syncSourceOf(root)!;
+  assert.equal(src.file, path.join(root, '.lexcode', 'import.md'));
+  assert.deepEqual(syncFrom(store, p.id, src.parsed), { added: [], updated: ['Also keep (status, source)', 'Keep (status, source)'], archived: ['Gone'] });
+  const by = (t: string) => store.all().stories.find(s => s.title === t);
+  assert.equal(by('Keep')!.status, 'done');
+  assert.equal(by('Also keep')!.status, 'doing');
+  assert.equal(by('Weeded out'), undefined);
 });
