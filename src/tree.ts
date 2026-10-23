@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { Store, Project, Epic, Sprint, Story } from './store';
 import { listSessions, Session } from './sessions';
 import { STAGE_LABEL } from './factory';
+import { Agent, liveRun, storySessions } from './claude';
 
 // epic undefined = "No epic" group; sprint undefined = backlog.
 export type Node =
@@ -23,7 +24,7 @@ export class BoardTree implements vscode.TreeDataProvider<Node> {
   private changed = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.changed.event;
 
-  constructor(private store: Store) {}
+  constructor(private store: Store, private agents: () => Record<string, Agent> = () => ({})) {}
 
   refresh() { this.store.reload(); this.changed.fire(); }
 
@@ -102,11 +103,12 @@ export class BoardTree implements vscode.TreeDataProvider<Node> {
     }
     const st = node.story;
     const item = new vscode.TreeItem(st.title, C.None);
+    const n = storySessions(st).length, run = liveRun(st, this.agents());
     item.description = [st.status, st.points != null && `${st.points}pt`,
-      st.sessionIds?.length && `${st.sessionIds.length} session${st.sessionIds.length > 1 ? 's' : ''}`].filter(Boolean).join(' · ');
+      run ? (run.state === 'blocked' ? '⚠ needs approval' : run.state) : n && `${n} session${n > 1 ? 's' : ''}`].filter(Boolean).join(' · ');
     item.tooltip = st.description;
     item.iconPath = new vscode.ThemeIcon(statusIcon[st.status]);
-    item.contextValue = st.sessionIds?.length ? 'story linked' : 'story';
+    item.contextValue = run ? 'story live' : n ? 'story linked' : 'story';
     return item;
   }
 }

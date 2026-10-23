@@ -13,7 +13,9 @@
     "vscode": "^1.90.0"
   },
   "main": "./out/extension.js",
-  "activationEvents": [],
+  "activationEvents": [
+    "onWebviewPanel:lexCode.dashboard"
+  ],
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -114,6 +116,11 @@
         "icon": "$(sparkle)"
       },
       {
+        "command": "lexCode.attachStory",
+        "title": "LexCode: Attach to Background Run",
+        "icon": "$(terminal)"
+      },
+      {
         "command": "lexCode.importTasks",
         "title": "LexCode: Import Tasks from TASKS.md",
         "icon": "$(cloud-download)"
@@ -154,8 +161,13 @@
       ],
       "view/item/context": [
         {
+          "command": "lexCode.attachStory",
+          "when": "viewItem == 'story live'",
+          "group": "inline@1"
+        },
+        {
           "command": "lexCode.claudeStory",
-          "when": "viewItem =~ /^story/",
+          "when": "viewItem =~ /^story/ && viewItem != 'story live'",
           "group": "inline@1"
         },
         {
@@ -257,6 +269,10 @@
         },
         {
           "command": "lexCode.claudeStory",
+          "when": "false"
+        },
+        {
+          "command": "lexCode.attachStory",
           "when": "false"
         },
         {

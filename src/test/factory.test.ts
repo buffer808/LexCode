@@ -101,12 +101,17 @@ test('parseEpicInput validates untrusted form input', () => {
   const ok = parseEpicInput({ title: '  Health  ', description: ' ', targetBranch: 'release/1.2', builderMode: 'auto',
     models: { planner: { model: 'sonnet', effort: 'max' }, builder: { model: 'rm -rf /', effort: 'huge' }, reviewer: { model: '', effort: '' } } }, agents, detected);
   assert.deepEqual(ok, { title: 'Health', description: undefined, targetBranch: 'release/1.2', builderMode: 'auto',
-    models: { planner: { model: 'sonnet', effort: 'max' } }, roleAgents: { orchestrator: 'lead' } });
+    models: { planner: { model: 'sonnet', effort: 'max' } }, roleAgents: { orchestrator: 'lead' }, reviewers: [''] });
 
   // Explicit role picks replace detection; unknown agents and '' (LexCode default) are dropped.
   assert.deepEqual(parseEpicInput({ title: 't', roleAgents: { orchestrator: '', reviewer: 'qa', builder: 'ghost', bogus: 'lead' } }, agents, detected).roleAgents,
     { reviewer: 'qa' });
   assert.equal(parseEpicInput({ title: 't', builderMode: 'bypassPermissions' }, agents, {}).builderMode, 'acceptEdits');
+  // Reviewers: known agents or '' (LexCode reviewer), deduped; the first also reviews stories.
+  const r = parseEpicInput({ title: 't', reviewers: ['qa', 'ghost', '', 'qa', 7] }, agents, {});
+  assert.deepEqual([r.reviewers, r.roleAgents.reviewer], [['qa', ''], 'qa']);
+  assert.deepEqual(parseEpicInput({ title: 't', reviewers: ['ghost'] }, agents, { reviewer: 'qa' }).reviewers, ['']);
+  assert.deepEqual(parseEpicInput({ title: 't' }, agents, { reviewer: 'qa' }).reviewers, ['qa']);
   assert.throws(() => parseEpicInput({ title: ' ' }, agents, {}), /title is required/);
   assert.throws(() => parseEpicInput({ title: 't', targetBranch: 'main; rm -rf' }, agents, {}), /Invalid target branch/);
 });
@@ -117,7 +122,7 @@ test('validBranch', () => {
 });
 
 /* ---------- build loop ---------- */
-import { nextActions, criticalReasons, sessionArgs, builderPrompt, reviewPrompt, sprintBranch, epicBranch, finished } from '../factory';
+import { nextActions, criticalReasons, sessionArgs, builderPrompt, reviewPrompt, sprintBranch, epicBranch, finished, reviewPanel, mergeVerdicts, sprintReviewPrompt } from '../factory';
 import { worktreeArgs } from '../agents';
 import { Board, Sprint, Story } from '../store';
 
@@ -168,7 +173,15 @@ test('scheduler: story loop inside a building sprint', () => {
 
   const R = (extra: Partial<Sprint>, agents = {}) => kinds(board([sp('S1', { worktree: '/wt', ...extra })], [st('x', 'S1', { status: 'done' })]), building(), agents);
   assert.deepEqual(R({ state: 'reviewing' }), ['reviewSprint:S1']);
-  assert.deepEqual(R({ state: 'reviewing', sessionId: 'sid', runStartedAt: 1 }, done(2)), ['sprintVerdict:S1']);
+  // Review panel: act when any reviewer finishes (read it) or when every verdict is in (decide); idle while they run.
+  const v = { pass: true, risk: 'minor' as const, issues: [] };
+  assert.deepEqual(R({ state: 'reviewing', reviews: [{ lens: 'security', sessionId: 'sid', startedAt: 1 }, { lens: 'reviewer', sessionId: 'b', startedAt: 1 }] },
+    { sid: { state: 'busy', startedAt: 1 }, b: { state: 'busy', startedAt: 1 } }), []);
+  assert.deepEqual(R({ state: 'reviewing', reviews: [{ lens: 'security', sessionId: 'sid', startedAt: 1 }, { lens: 'reviewer', sessionId: 'b', startedAt: 1 }] },
+    { ...done(2), b: { state: 'busy', startedAt: 1 } }), ['sprintVerdict:S1']);
+  assert.deepEqual(R({ state: 'reviewing', reviews: [{ lens: 'security', sessionId: 'sid', startedAt: 1, verdict: v }, { lens: 'reviewer', sessionId: 'b', startedAt: 1 }] },
+    { ...done(2), b: { state: 'busy', startedAt: 1 } }), []); // only already-read ones finished
+  assert.deepEqual(R({ state: 'reviewing', reviews: [{ lens: 'security', verdict: v }, { lens: 'reviewer', verdict: v }] }), ['sprintVerdict:S1']);
   assert.deepEqual(R({ state: 'fixing', sessionId: 'sid', runStartedAt: 1 }, done(2)), ['reviewSprint:S1']);
   assert.deepEqual(R({ state: 'awaitingMerge' }), []);
   assert.ok(!finished({}, undefined) && !finished({ a: { state: 'blocked', startedAt: 9 } }, 'a'));
@@ -180,9 +193,25 @@ test('criticalReasons', () => {
   const globs = ['package.json', '**/auth/**'];
   const withSec = validatePlan({ summary: 's', sprints: [{ key: 'S1', name: 'n', stories: [{ title: 't' }] }, { key: 'S2', name: 'n', stories: [{ title: 't' }] }],
     security: [{ severity: 'low', sprint: 'S1', finding: 'meh' }, { severity: 'high', sprint: 'S1', finding: 'XSS' }, { severity: 'high', sprint: 'S2', finding: 'other' }] });
-  assert.deepEqual(criticalReasons(S1, v('minor'), ['src/a.ts'], globs), []);
-  assert.deepEqual(criticalReasons(S1, v('critical'), ['src/auth/x.ts', 'package.json'], globs, withSec), [
-    'reviewer flagged the sprint as critical', 'sensitive paths changed: src/auth/x.ts, package.json', 'high security finding: XSS']);
+  assert.deepEqual(criticalReasons(S1, [{ lens: 'reviewer', verdict: v('minor') }], ['src/a.ts'], globs), []);
+  assert.deepEqual(criticalReasons(S1, [{ lens: 'security', agent: 'sec-arch', verdict: v('critical') }, { lens: 'reviewer', verdict: v('minor') }],
+    ['src/auth/x.ts', 'package.json'], globs, withSec), [
+    'sec-arch flagged the sprint as critical', 'sensitive paths changed: src/auth/x.ts, package.json', 'high security finding: XSS']);
+});
+
+test('sprint review panel', () => {
+  // Revalidator + security again, then every picked reviewer ('' = LexCode reviewer); legacy epics fall back to roleAgents.reviewer.
+  assert.deepEqual(reviewPanel(building({ roleAgents: { security: 'sec' }, reviewers: ['qa', ''] })),
+    [{ lens: 'revalidator', agent: undefined }, { lens: 'security', agent: 'sec' }, { lens: 'reviewer', agent: 'qa' }, { lens: 'reviewer', agent: undefined }]);
+  assert.deepEqual(reviewPanel(building({ roleAgents: { reviewer: 'old' } })).map(r => r.agent), [undefined, undefined, 'old']);
+  const m = mergeVerdicts([{ lens: 'security', agent: 'sec', verdict: { pass: false, risk: 'critical', issues: ['SQL injection in x.py:3'] } },
+    { lens: 'reviewer', verdict: { pass: true, risk: 'minor', issues: [] } }]);
+  assert.deepEqual(m, { pass: false, risk: 'critical', issues: ['[sec] SQL injection in x.py:3'] });
+  assert.equal(mergeVerdicts([{ lens: 'reviewer', verdict: { pass: true, risk: 'minor', issues: ['nit'] } }]).pass, true);
+  const p = sprintReviewPrompt(building({ branch: 'lexcode/e' }), sp('S1', { branch: 'lexcode/e--s1' }), [], '+x', 'security',
+    { collaborators: [agent('sec'), agent('db')], projectPath: '/p', self: 'sec' });
+  assert.match(p, /# Security sprint: S1[\s\S]*tenant\/data isolation[\s\S]*- db: db desc[\s\S]*"pass": true/);
+  assert.doesNotMatch(p, /- sec:/);
 });
 
 test('builder/reviewer prompts and args', () => {

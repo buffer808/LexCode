@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { Board, Epic, EpicStage, ModelChoice, ModelRole, Project, Role, Sprint, Story, Store } from './store';
+import { Board, Epic, EpicStage, ModelChoice, ModelRole, Project, Role, Sprint, SprintReview, Story, Store } from './store';
 import { AgentDef } from './agents';
 import { Plan, Verdict, extractJson, validatePlan, validateVerdict, renderPlanMd } from './plan';
 import { globMatch } from './git';
@@ -68,12 +68,12 @@ export function stagePrompt(stage: EpicStage, epic: Epic, ctx: StageContext): st
   ].filter(Boolean).join('\n\n');
 }
 
-// Args for `claude --bg` (launchBackground adds --bg). resumeId: continue that session with `prompt`.
-export function stageArgs(stage: EpicStage, epic: Epic, prompt: string, settings: Partial<Record<ModelRole, ModelChoice>>, agent?: AgentDef, resumeId?: string): string[] {
+// Args for `claude --bg` (launchBackground adds --bg). resumeId: continue that session with `prompt`. extra: worktreeArgs.
+export function stageArgs(stage: EpicStage, epic: Epic, prompt: string, settings: Partial<Record<ModelRole, ModelChoice>>, agent?: AgentDef, resumeId?: string, extra: string[] = []): string[] {
   const role = STAGE_ROLE[stage]!;
   // --disallowedTools is variadic: keep an option right after it so it can't swallow the prompt.
   return ['--disallowedTools', 'ExitPlanMode', '--permission-mode', 'plan',
-    ...(agent ? ['--agent', agent.name] : []), ...modelArgs(epic, role, settings, agent),
+    ...(agent ? ['--agent', agent.name] : []), ...modelArgs(epic, role, settings, agent), ...extra,
     ...(resumeId ? ['--resume', resumeId] : ['-n', `LexCode · ${epic.title} · ${STAGE_LABEL[stage]}`]), prompt];
 }
 
@@ -133,6 +133,7 @@ export interface EpicInput {
   builderMode: 'acceptEdits' | 'auto';
   models?: Partial<Record<ModelRole, ModelChoice>>;
   roleAgents: Partial<Record<Role, string>>;
+  reviewers: string[];
 }
 
 const MODEL_ROLES: ModelRole[] = ['planner', 'builder', 'reviewer'];
@@ -164,8 +165,15 @@ export function parseEpicInput(raw: any, agents: AgentDef[], detected: Partial<R
       if (typeof name === 'string' && agents.some(a => a.name === name)) roleAgents[r] = name;
     }
   }
+  // Sprint review panel: picked agents ('' = LexCode reviewer); the first one also reviews each story.
+  let reviewers = Array.isArray(raw.reviewers)
+    ? [...new Set(raw.reviewers.filter((n: unknown) => n === '' || (typeof n === 'string' && agents.some(a => a.name === n))) as string[])].slice(0, 5)
+    : [roleAgents.reviewer ?? ''];
+  if (!reviewers.length) reviewers = [''];
+  roleAgents = { ...roleAgents, reviewer: reviewers[0] || undefined };
+  if (!roleAgents.reviewer) delete roleAgents.reviewer;
   return { title, description, targetBranch: tb || undefined, builderMode: raw.builderMode === 'auto' ? 'auto' : 'acceptEdits',
-    models: Object.keys(models).length ? models : undefined, roleAgents };
+    models: Object.keys(models).length ? models : undefined, roleAgents, reviewers };
 }
 
 /* ---------- build loop: sprints → stories → builder → reviewer → merge ---------- */
@@ -186,8 +194,8 @@ export type Action =
   | { kind: 'build'; sprint: Sprint; story: Story }     // start (or restart) the story's builder
   | { kind: 'review'; sprint: Sprint; story: Story }    // builder finished: check commits, start reviewer
   | { kind: 'verdict'; sprint: Sprint; story: Story }   // reviewer finished: pass → done, fail → back to builder
-  | { kind: 'reviewSprint'; sprint: Sprint }            // all stories done, or a fix finished
-  | { kind: 'sprintVerdict'; sprint: Sprint }           // sprint review finished: merge, gate, or fix
+  | { kind: 'reviewSprint'; sprint: Sprint }            // all stories done, or a fix finished: start the review panel
+  | { kind: 'sprintVerdict'; sprint: Sprint }           // a panel reviewer finished: read it; all in → merge, gate, or fix
   | { kind: 'finish' };                                 // every sprint merged: PR gate
 
 export const sprintsOf = (b: Board, e: Epic) => b.sprints.filter(s => s.epicId === e.id).sort((x, y) => (x.order ?? 0) - (y.order ?? 0));
@@ -214,8 +222,10 @@ export function nextActions(b: Board, e: Epic, agents: Record<string, AgentState
       else if (story.status === 'review' && !story.reviewerSessionId) out.push({ kind: 'review', sprint: sp, story });
       else if (story.status === 'review' && finished(agents, story.reviewerSessionId, story.runStartedAt)) out.push({ kind: 'verdict', sprint: sp, story });
     } else if (sp.state === 'reviewing') {
-      if (!sp.sessionId) out.push({ kind: 'reviewSprint', sprint: sp });
-      else if (finished(agents, sp.sessionId, sp.runStartedAt)) out.push({ kind: 'sprintVerdict', sprint: sp });
+      const rs = sp.reviews ?? [];
+      if (!rs.length) out.push({ kind: 'reviewSprint', sprint: sp });
+      // A reviewer finished (read its verdict), or every verdict is in (decide).
+      else if (rs.every(r => r.verdict) || rs.some(r => !r.verdict && finished(agents, r.sessionId, r.startedAt))) out.push({ kind: 'sprintVerdict', sprint: sp });
     } else if (sp.state === 'fixing' && finished(agents, sp.sessionId, sp.runStartedAt)) {
       out.push({ kind: 'reviewSprint', sprint: sp });
     }
@@ -275,15 +285,37 @@ export function reviewPrompt(e: Epic, sp: Sprint, s: Story, diff: string, ctx: B
     collaboratorList(ctx.collaborators, e.roleAgents?.reviewer), verdictRules].filter(Boolean).join('\n\n');
 }
 
-export function sprintReviewPrompt(e: Epic, sp: Sprint, stories: Story[], diff: string, ctx: BuildContext): string {
-  return [ctx.roleBody, `# Review sprint: ${sp.name}`,
+export type Lens = SprintReview['lens'];
+export const LENS_LABEL: Record<Lens, string> = { revalidator: 'Revalidate', security: 'Security', reviewer: 'Review' };
+const LENS_TASK: Record<Lens, string> = {
+  revalidator: 'Revalidate the built code against the plan and the codebase: does it reuse existing code instead of duplicating it, ' +
+    'are the dependencies it relies on available and used correctly, are all affected callers and files updated, is anything from the stories missing?',
+  security: 'Security-review the built code: authentication and authorization, tenant/data isolation, input validation and injection, ' +
+    'secrets, unsafe defaults, data loss, risky dependencies. Fail for medium or high risks; set risk "critical" for anything security-sensitive.',
+  reviewer: 'The sprint\'s stories each passed review. Check the sprint as a whole: do the stories fit together, is anything missing, do the tests cover it, is it safe to merge?',
+};
+// Sprint review panel: revalidator + security again (now on the code), then each picked reviewer.
+export const reviewersOf = (e: Epic) => e.reviewers?.length ? e.reviewers : [e.roleAgents?.reviewer ?? ''];
+export const reviewPanel = (e: Epic): SprintReview[] => [
+  { lens: 'revalidator', agent: e.roleAgents?.revalidator }, { lens: 'security', agent: e.roleAgents?.security },
+  ...reviewersOf(e).map(a => ({ lens: 'reviewer' as const, agent: a || undefined }))];
+export const reviewLabel = (r: SprintReview) => r.agent ?? `LexCode ${r.lens}`;
+
+export function sprintReviewPrompt(e: Epic, sp: Sprint, stories: Story[], diff: string, lens: Lens, ctx: BuildContext & { self?: string }): string {
+  return [ctx.roleBody, `# ${LENS_LABEL[lens]} sprint: ${sp.name}`,
     `Epic: ${e.title}${e.description ? `\n${e.description}` : ''}`,
-    `The sprint's stories each passed review. Check the sprint as a whole before it merges into \`${e.branch}\`: ` +
-    `do the stories fit together, is anything missing, do the tests cover it, is it safe to merge?`,
+    `You are one of several reviewers of this sprint before it merges into \`${e.branch}\`. ${LENS_TASK[lens]}`,
     `## Stories\n${stories.map(s => `- ${s.title}`).join('\n')}`,
     `## Diff (${e.branch}...${sp.branch})\n\`\`\`diff\n${clip(diff, e.branch ?? '')}\n\`\`\``,
-    collaboratorList(ctx.collaborators, e.roleAgents?.reviewer), verdictRules].filter(Boolean).join('\n\n');
+    collaboratorList(ctx.collaborators, ctx.self), verdictRules].filter(Boolean).join('\n\n');
 }
+
+// All panel verdicts → one: passes only if every reviewer passes; issues are tagged with who raised them.
+export const mergeVerdicts = (reviews: SprintReview[]): Verdict => ({
+  pass: reviews.every(r => r.verdict?.pass),
+  risk: reviews.some(r => r.verdict?.risk === 'critical') ? 'critical' : 'minor',
+  issues: reviews.flatMap(r => (r.verdict?.issues ?? []).map(i => `[${reviewLabel(r)}] ${i}`)),
+});
 
 export const sprintFixPrompt = (e: Epic, sp: Sprint, issues: string[]) =>
   `# Fix sprint: ${sp.name}\n\nYou work unattended. Your current directory already is a git worktree on branch \`${sp.branch}\` (epic branch \`${e.branch}\`): work here, do not create or enter other worktrees. ` +
@@ -299,9 +331,8 @@ export function parseVerdict(text: string | undefined): Verdict {
 }
 
 // Why a reviewed sprint's merge needs a human. Empty = merge automatically.
-export function criticalReasons(sp: Sprint, verdict: Verdict, changed: string[], sensitiveGlobs: string[], plan?: Plan): string[] {
-  const out: string[] = [];
-  if (verdict.risk === 'critical') out.push('reviewer flagged the sprint as critical');
+export function criticalReasons(sp: Sprint, reviews: SprintReview[], changed: string[], sensitiveGlobs: string[], plan?: Plan): string[] {
+  const out = reviews.filter(r => r.verdict?.risk === 'critical').map(r => `${reviewLabel(r)} flagged the sprint as critical`);
   const hits = changed.filter(f => sensitiveGlobs.some(g => globMatch(f, g)));
   if (hits.length) out.push(`sensitive paths changed: ${hits.slice(0, 10).join(', ')}${hits.length > 10 ? ', …' : ''}`);
   for (const f of plan?.security ?? []) {
@@ -315,7 +346,7 @@ const NO_WORKTREE_TOOLS = ['EnterWorktree', 'ExitWorktree'];
 
 export interface SessionArgs { mode: string; agent?: AgentDef; extra: string[]; name?: string; resumeId?: string }
 // Args for builder/reviewer sessions (launchBackground adds --bg). Reviewers are read-only.
-export function sessionArgs(e: Epic, role: 'builder' | 'reviewer', prompt: string, settings: Partial<Record<ModelRole, ModelChoice>>, a: SessionArgs): string[] {
+export function sessionArgs(e: Epic, role: Role, prompt: string, settings: Partial<Record<ModelRole, ModelChoice>>, a: SessionArgs): string[] {
   return ['--disallowedTools', ...(a.mode === 'plan' ? ['ExitPlanMode'] : []), ...NO_WORKTREE_TOOLS, '--permission-mode', a.mode,
     ...(a.agent ? ['--agent', a.agent.name] : []), ...modelArgs(e, role, settings, a.agent), ...a.extra,
     ...(a.resumeId ? ['--resume', a.resumeId] : a.name ? ['-n', a.name] : []), prompt];

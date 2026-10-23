@@ -28,6 +28,9 @@ export async function resumeSession(project: Project, sessionId: string) {
   else terminal(project, `--resume ${sessionId}`);
 }
 
+// Interactive session in a terminal at the project root, whatever folder the editor has open.
+export const terminalSession = (project: Project, prompt: string) => terminal(project, shellQuote(prompt));
+
 // Opens an interactive session with `prompt`, no story link.
 export async function startSession(project: Project, prompt: string) {
   if (useExtension()) await vscode.commands.executeCommand(EXT_OPEN, undefined, prompt);
@@ -135,6 +138,16 @@ export async function backgroundAgents(): Promise<Record<string, Agent>> {
   return out;
 }
 
+// Every session linked to a story: ones you started, plus the factory's builder and reviewer.
+export const storySessions = (s: Story) =>
+  [...(s.sessionIds ?? []), s.builderSessionId, s.reviewerSessionId].filter((id): id is string => !!id);
+
+// The story's background run still in progress, preferring one that waits for approval.
+export function liveRun(s: Story, agents: Record<string, Agent>): Agent | undefined {
+  const live = storySessions(s).reverse().map(id => agents[id]).filter(a => a && !['done', 'stopped', 'failed'].includes(a.state));
+  return live.find(a => a.state === 'blocked') ?? live[0];
+}
+
 export function attach(project: Project, agentId: string) {
   terminal(project, `attach ${agentId}`);
 }
@@ -158,7 +171,7 @@ export class AgentWatcher implements vscode.Disposable {
       ...b.stories.flatMap(s => (s.sessionIds ?? []).map(id => [id, { title: s.title, projectId: s.projectId, quiet: false }] as const)),
       ...b.epics.flatMap(e => e.stageSessionId ? [[e.stageSessionId, { title: `${e.title} (${e.stage})`, projectId: e.projectId, quiet: true }] as const] : []),
       ...b.stories.flatMap(s => [s.builderSessionId, s.reviewerSessionId].flatMap(id => id ? [[id, { title: s.title, projectId: s.projectId, quiet: true }] as const] : [])),
-      ...b.sprints.flatMap(s => s.sessionId ? [[s.sessionId, { title: s.name, projectId: s.projectId, quiet: true }] as const] : []),
+      ...b.sprints.flatMap(s => [s.sessionId, ...(s.reviews ?? []).map(r => r.sessionId)].flatMap(id => id ? [[id, { title: s.name, projectId: s.projectId, quiet: true }] as const] : [])),
     ]);
     if (!tracked.size) return;
     this.busy = true;

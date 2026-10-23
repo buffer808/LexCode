@@ -4,7 +4,9 @@ import { randomUUID, createHash } from 'crypto';
 
 export type Status = 'todo' | 'doing' | 'review' | 'done';
 
-export interface Project { id: string; name: string; path: string }
+export interface Project { id: string; name: string; path: string; pr?: { via: PrVia; skill?: string } } // pr: last way a PR was opened
+// gh = GitHub CLI, tea = Gitea (with the `tea` login's token), skill = a Claude Code skill such as /git-release.
+export type PrVia = 'gh' | 'tea' | 'skill';
 
 /* ---------- software factory (epic → plan → build → review → PR) ---------- */
 export type EpicStage = 'planning' | 'revalidating' | 'securityCheck' | 'awaitingPlanApproval'
@@ -13,7 +15,8 @@ export type Role = 'orchestrator' | 'revalidator' | 'security' | 'builder' | 're
 export type ModelRole = 'planner' | 'builder' | 'reviewer'; // planner = orchestrator, revalidator, security
 export interface ModelChoice { model?: string; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' }
 // Epic-level human decision. Merge and retry decisions live on the sprint/story (awaitingMerge, blocked).
-export interface Gate { kind: 'plan' | 'pr'; reason?: string }
+// pr gate: busy = when pushing/creating started (stale after a reload, so it's a time); skill = a PR skill was started and LexCode waits for its URL; reason = last error.
+export interface Gate { kind: 'plan' | 'pr'; reason?: string; busy?: number; skill?: string }
 
 export interface Epic {
   id: string; projectId: string; title: string;
@@ -24,6 +27,7 @@ export interface Epic {
   builderMode?: 'acceptEdits' | 'auto';
   models?: Partial<Record<ModelRole, ModelChoice>>;
   roleAgents?: Partial<Record<Role, string>>; // role → agent name, frozen at creation
+  reviewers?: string[]; // sprint review panel next to revalidator + security; '' = LexCode reviewer
   stageSessionId?: string; stageStartedAt?: number; stageAttempts?: number;
   feedback?: string; // human "request changes" text for the next planning run
   pending?: Gate;
@@ -35,11 +39,18 @@ export interface Sprint {
   epicId?: string; key?: string; order?: number; dependsOn?: string[]; parallel?: boolean;
   branch?: string; worktree?: string;
   state?: SprintState;
-  sessionId?: string; runStartedAt?: number; // sprint review or fix session
+  sessionId?: string; runStartedAt?: number; // fix session
+  reviews?: SprintReview[];                   // sprint review panel, run in parallel; all must pass
   attempts?: number; fixups?: number;        // failed sprint reviews; invalid-output corrections
   issues?: string[]; risk?: 'minor' | 'critical';
   critical?: string[]; // reasons the merge waits for human approval (state awaitingMerge)
   blocked?: string;    // needs a human: retries exhausted, invalid output, launch error
+}
+// One reviewer of a sprint: the revalidator and security agents again (now on the code), plus each picked reviewer.
+export interface SprintReview {
+  lens: 'revalidator' | 'security' | 'reviewer'; agent?: string; // agent undefined = LexCode's bundled prompt
+  sessionId?: string; startedAt?: number; fixups?: number;
+  verdict?: { pass: boolean; risk: 'minor' | 'critical'; issues: string[] };
 }
 export type SprintState = 'waiting' | 'building' | 'reviewing' | 'fixing' | 'awaitingMerge' | 'merged';
 export interface Attachment { id: string; name: string; file: string; mime: string }

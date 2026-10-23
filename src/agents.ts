@@ -48,6 +48,19 @@ export function discoverAgents(projectPath: string, home = os.homedir()): AgentD
   return [...project, ...readDir(path.join(home, '.claude', 'agents'), 'user').filter(a => !names.has(a.name))];
 }
 
+// Slash commands a PR can be opened with: skills (<name>/SKILL.md) and commands (<name>.md), project then user.
+export function discoverSkills(projectPath: string, home = os.homedir()): string[] {
+  const names = (dir: string, skills: boolean) => {
+    try {
+      return fs.readdirSync(dir, { withFileTypes: true }).flatMap(d => skills
+        ? d.isDirectory() && fs.existsSync(path.join(dir, d.name, 'SKILL.md')) ? [d.name] : []
+        : d.isFile() && d.name.endsWith('.md') ? [d.name.slice(0, -3)] : []);
+    } catch { return []; }
+  };
+  return [...new Set([projectPath, home].flatMap(root =>
+    [...names(path.join(root, '.claude', 'skills'), true), ...names(path.join(root, '.claude', 'commands'), false)]))];
+}
+
 // .lexcode/factory.json: { "roles": { "orchestrator": "tech-lead", ... } } for agents whose names don't say their role.
 export function factoryConfig(projectPath: string): { roles: Partial<Record<Role, string>> } {
   let raw: any;

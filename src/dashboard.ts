@@ -5,7 +5,8 @@ import { randomUUID } from 'crypto';
 import { Store, Story, Status } from './store';
 import { BoardTree } from './tree';
 import { listSessions, editedFiles } from './sessions';
-import { AgentWatcher, PERMISSION_MODES, runInBackground, attach } from './claude';
+import { discoverSkills } from './agents';
+import { AgentWatcher, PERMISSION_MODES, runInBackground, attach, storySessions } from './claude';
 import { FactoryRunner, Decision } from './factoryRunner';
 import { parseEpicInput, validBranch, STAGE_LABEL, EFFORTS } from './factory';
 
@@ -41,19 +42,25 @@ function gateDecision(m: any): Decision | undefined {
     case 'sendBack': return sprintId && text ? { decision: 'sendBack', sprintId, text } : undefined;
     case 'retryStory': case 'skipStory': return storyId ? { decision: m.decision, storyId } : undefined;
     case 'createPr': {
-      const targetBranch = str(m.targetBranch);
-      return !targetBranch || validBranch(targetBranch) ? { decision: 'createPr', targetBranch } : undefined;
+      const targetBranch = str(m.targetBranch), skill = str(m.skill);
+      const via = ['auto', 'gh', 'tea', 'skill'].includes(m.via) ? m.via : 'auto';
+      if (targetBranch && !validBranch(targetBranch) || skill && !/^[\w.:-]+$/.test(skill)) return;
+      return { decision: 'createPr', targetBranch, via, skill: via === 'skill' ? skill : undefined };
     }
+    case 'prOpened': return /^https?:\/\/\S+$/.test(str(m.url) ?? '') ? { decision: 'prOpened', url: str(m.url)! } : undefined;
   }
 }
 
-export function showDashboard(context: vscode.ExtensionContext, store: Store, tree: BoardTree, agents: AgentWatcher, factory: FactoryRunner) {
-  if (panel) return panel.reveal();
+// `restored`: a tab VS Code brought back after a reload/extension-host restart; it is rewired, otherwise its clicks go nowhere.
+export function showDashboard(context: vscode.ExtensionContext, store: Store, tree: BoardTree, agents: AgentWatcher, factory: FactoryRunner, restored?: vscode.WebviewPanel) {
+  if (panel && !restored) return panel.reveal();
+  if (panel && restored) panel.dispose();
   const media = vscode.Uri.joinPath(context.extensionUri, 'media');
   const attachRoot = vscode.Uri.file(store.attachmentsDir());
-  panel = vscode.window.createWebviewPanel('lexCode.dashboard', 'LexCode', vscode.ViewColumn.One,
-    { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [media, attachRoot] });
+  const options = { enableScripts: true, localResourceRoots: [media, attachRoot] };
+  panel = restored ?? vscode.window.createWebviewPanel('lexCode.dashboard', 'LexCode', vscode.ViewColumn.One, { ...options, retainContextWhenHidden: true });
   const w = panel.webview;
+  w.options = options;
   const nonce = randomUUID().replace(/-/g, '');
   const uri = (f: string) => w.asWebviewUri(vscode.Uri.joinPath(media, f));
   w.html = `<!doctype html><html><head><meta charset="utf-8">
@@ -75,6 +82,7 @@ export function showDashboard(context: vscode.ExtensionContext, store: Store, tr
       defaultMode: vscode.workspace.getConfiguration('lexCode').get('backgroundPermissionMode', 'manual'),
       attachBase: w.asWebviewUri(attachRoot).toString(),
       factory: { roleAgents, stages: STAGE_LABEL,
+        skills: Object.fromEntries(board.projects.map(p => [p.id, discoverSkills(p.path)])),
         plans: Object.fromEntries(board.projects.flatMap(p => Object.entries(factory.planPaths(p.path, board.epics.filter(e => e.projectId === p.id && e.stage).map(e => e.id))))), efforts: EFFORTS, targetBranch: cfg.get('targetBranch', 'main'),
         builderMode: cfg.get('builderPermissionMode', 'acceptEdits'), models: cfg.get('models', {}), workers: cfg.get('defaultWorkers', 1) } });
   };
@@ -146,7 +154,7 @@ export function showDashboard(context: vscode.ExtensionContext, store: Store, tr
       case 'attach': {
         const a = agents.agents[m.sessionId];
         const project = b.projects.find(p => p.id === story?.projectId);
-        if (a && project && story?.sessionIds?.includes(m.sessionId)) attach(project, a.id);
+        if (a && project && story && storySessions(story).includes(m.sessionId)) attach(project, a.id);
         return;
       }
       case 'edits': {
@@ -236,7 +244,7 @@ export function showDashboard(context: vscode.ExtensionContext, store: Store, tr
         const project = e && b.projects.find(p => p.id === e.projectId);
         if (!e || !project) return;
         const own = [e.stageSessionId, ...b.stories.filter(s => s.epicId === e.id).flatMap(s => [s.builderSessionId, s.reviewerSessionId]),
-          ...b.sprints.filter(s => s.epicId === e.id).map(s => s.sessionId)];
+          ...b.sprints.filter(s => s.epicId === e.id).flatMap(s => [s.sessionId, ...(s.reviews ?? []).map(r => r.sessionId)])];
         const sid = typeof m.sessionId === 'string' ? m.sessionId : e.stageSessionId;
         const a = sid && own.includes(sid) ? agents.agents[sid] : undefined;
         if (a) attach(project, a.id);

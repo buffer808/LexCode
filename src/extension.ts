@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { Store, Project, Status } from './store';
 import { BoardTree, Node } from './tree';
-import { resumeSession, openStorySession, startSession, AgentWatcher } from './claude';
+import { resumeSession, openStorySession, startSession, AgentWatcher, attach, liveRun } from './claude';
 import { showDashboard } from './dashboard';
 import { FactoryRunner } from './factoryRunner';
 import { parseEpicInput, validBranch, EFFORTS } from './factory';
@@ -16,8 +16,9 @@ export function activate(context: vscode.ExtensionContext) {
     try { if (s.source && !syncSource(s)) vscode.window.showWarningMessage(`Couldn't find "${s.title}" in ${path.basename(s.source.file)} to update its checkbox`); }
     catch (e: any) { vscode.window.showWarningMessage(`Couldn't update ${s.source!.file}: ${e.message}`); }
   });
-  const tree = new BoardTree(store);
   const agents = new AgentWatcher(store);
+  const tree = new BoardTree(store, () => agents.agents);
+  agents.onDidChange(() => tree.refresh());
   const factory = new FactoryRunner(store, agents, path.join(context.globalStorageUri.fsPath, 'locks'),
     context.asAbsolutePath('agents'), () => tree.refresh());
 
@@ -123,7 +124,7 @@ export function activate(context: vscode.ExtensionContext) {
     if (!pick.mode) return store.add('epics', { projectId: p.id, title });
     const description = await vscode.window.showInputBox({ ...opts, prompt: `Describe "${title}" for the orchestrator: goal, constraints, acceptance criteria` });
     if (description === undefined) return;
-    const targetBranch = await vscode.window.showInputBox({ ...opts, prompt: 'Pull request target branch', value: cfg.get('targetBranch', 'main'),
+    const targetBranch = await vscode.window.showInputBox({ ...opts, prompt: 'Target branch: the epic branch is cut from it, and the PR goes back into it', value: cfg.get('targetBranch', 'main'),
       validateInput: v => validBranch(v.trim()) ? undefined : 'Not a valid branch name' });
     if (targetBranch === undefined) return;
     const { agents: defs, roles } = factory.detectedRoles(p);
@@ -156,6 +157,8 @@ export function activate(context: vscode.ExtensionContext) {
     cmd('lexCode.refresh', () => {}),
 
     vscode.commands.registerCommand('lexCode.dashboard', () => showDashboard(context, store, tree, agents, factory)),
+    vscode.window.registerWebviewPanelSerializer('lexCode.dashboard', {
+      deserializeWebviewPanel: async p => { showDashboard(context, store, tree, agents, factory, p); } }),
 
     cmd('lexCode.addProject', async () => {
       const picked = await vscode.window.showOpenDialog({ canSelectFolders: true, canSelectFiles: false, canSelectMany: true });
@@ -287,6 +290,13 @@ export function activate(context: vscode.ExtensionContext) {
 
     cmd('lexCode.resumeSession', (node: Node) => {
       if (node.kind === 'session') return resumeSession(node.project, node.session.id);
+    }),
+
+    cmd('lexCode.attachStory', (node: Node) => {
+      if (node.kind !== 'story') return;
+      const project = store.all().projects.find(p => p.id === node.story.projectId);
+      const run = liveRun(node.story, agents.agents);
+      if (project && run) attach(project, run.id);
     }),
 
     cmd('lexCode.claudeStory', async (node: Node, forceNew = false) => {

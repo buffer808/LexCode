@@ -137,33 +137,112 @@ dialog#epic textarea { min-height: 180px; }
 .modal details.models .grid { display: grid; grid-template-columns: 1fr auto auto; gap: 6px 8px; align-items: center; margin-top: 8px; font-size: 0.9em; }
 .modal .grid select, .epic-strip textarea { font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background);
   border: 1px solid var(--vscode-input-border, var(--line)); border-radius: var(--radius); padding: 4px 6px; }
-.epics { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
-.epic-strip { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
-.epic-strip.needs { border-color: var(--accent); }
+.epics { display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px; }
+.epic-strip { --c: var(--c-doing); padding: 14px 16px; border: 1px solid var(--line); border-left: 3px solid var(--c); border-radius: var(--radius); background: var(--surface); }
+.epic-strip.stage-ready, .epic-strip.stage-done { --c: var(--c-done); }
+.epic-strip.stage-cancelled, .epic-strip.stage-failed { --c: var(--line); }
+.epic-strip.needs { --c: var(--accent); border-color: var(--accent); }
 .epic-strip .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .epic-strip .spacer { flex: 1; }
-.epic-strip .gate { margin-top: 10px; align-items: stretch; }
+.epic-strip p { margin: 0; }
+.epic-strip input, .epic-strip textarea { font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--line)); border-radius: var(--radius); padding: 4px 6px; }
+.epic-strip label.inline { display: flex; align-items: center; gap: 6px; color: var(--vscode-descriptionForeground); }
+.epic-strip button.link { padding: 0; background: transparent; color: var(--vscode-textLink-foreground); }
+.epic-strip button.link:hover { text-decoration: underline; background: transparent; }
+.epic-strip code { font-family: var(--vscode-editor-font-family); font-size: 0.95em; }
+
+/* header: title + facts left, actions right */
+.epic-strip .head { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 16px; }
+.epic-strip .titles { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 6px; }
+.epic-strip .epic-title { align-self: flex-start; text-align: left; font-size: 1.15em; font-weight: 600; }
+.epic-strip strong.epic-title { color: var(--vscode-foreground); }
+.epic-strip .facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; font-size: 0.85em; color: var(--vscode-descriptionForeground); }
+.epic-strip .actions { display: flex; flex-wrap: wrap; gap: 6px; }
+button.on { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
+button.quiet { background: transparent; color: var(--vscode-descriptionForeground); }
+button.quiet:hover { background: transparent; color: var(--vscode-errorForeground); }
+
+/* pipeline stepper */
+.steps { display: flex; gap: 4px; margin: 14px 0 0; padding: 0; list-style: none; font-size: 0.8em; color: var(--vscode-descriptionForeground); }
+.steps li { flex: 1; min-width: 0; padding-top: 6px; border-top: 3px solid var(--line); }
+.steps li.done { border-color: var(--c-done); }
+.steps li.done > .label::before { content: '✓ '; color: var(--c-done); }
+.steps li.current { border-color: var(--c-doing); color: var(--vscode-foreground); }
+.steps li.current > .label { font-weight: 600; }
+.steps li small { display: block; margin-top: 2px; font-size: 0.95em; color: var(--vscode-descriptionForeground); overflow-wrap: anywhere; }
+.steps small .done { color: var(--c-done); }
+.steps small .current { color: var(--vscode-foreground); font-weight: 600; }
+.steps li.current.needs { border-color: var(--accent); }
+.steps.off { opacity: 0.5; }
+
+/* what is running right now */
+.activity { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; padding: 6px 10px; border-radius: var(--radius);
+  background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent); }
+.activity.needs { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.activity .what { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.activity button { padding: 2px 10px; }
+.dot { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--vscode-descriptionForeground); }
+.dot.working, .dot.busy { background: var(--c-doing); animation: pulse 1.6s ease-in-out infinite; }
+.dot.blocked { background: var(--accent); }
+.dot.done { background: var(--c-done); }
+.dot.starting { background: transparent; border: 1px solid var(--vscode-descriptionForeground); }
+@keyframes pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .dot { animation: none !important; } }
+
+.alert { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; padding: 8px 10px; border-radius: var(--radius);
+  color: var(--vscode-errorForeground); background: color-mix(in srgb, var(--vscode-errorForeground) 10%, transparent); }
+.alert .muted { color: var(--vscode-descriptionForeground); }
+
+/* human decisions */
+.epic-strip .gate { margin-top: 12px; padding: 10px; border: 1px solid var(--accent); border-radius: var(--radius); }
+.epic-strip .gate .prompt { margin-bottom: 8px; }
+.epic-strip .gate .row { align-items: stretch; }
 .epic-strip .gate textarea { flex: 1; min-width: 200px; resize: vertical; }
-.epic-strip p { margin: 6px 0 0; }
-.badge { padding: 1px 8px; border-radius: 10px; font-size: 0.85em; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
-.badge.stage-awaitingPlanApproval, .badge.stage-awaitingPrApproval, .badge.stage-paused { background: var(--accent); color: var(--accent-fg); }
-.badge.stage-ready, .badge.stage-done { background: var(--c-done); color: #000; }
-.badge.stage-failed, .badge.stage-cancelled { background: transparent; border: 1px solid var(--line); color: var(--vscode-descriptionForeground); }
+.epic-strip .stack { display: flex; flex-direction: column; gap: 6px; }
+.epic-strip .reasons { margin: 0 0 8px; padding-left: 18px; color: var(--vscode-editorWarning-foreground, #cca700); }
+
+.epic-strip .progress { margin-top: 12px; }
+.epic-strip .progress .bar { width: 160px; margin: 0; }
+.bar.mini { width: 60px; margin: 0; }
+
+/* sprints */
+.epic-strip .sprints { display: flex; flex-direction: column; gap: 6px; margin: 12px 0 0; padding: 0; list-style: none; }
+.epic-strip .sprint { padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius); }
+.epic-strip .sprint.selected { border-color: var(--vscode-focusBorder); }
+.epic-strip .sprint.needs { border-color: var(--accent); }
+.epic-strip .sprint.state-merged { opacity: 0.65; }
+.epic-strip .sprint .activity { margin-top: 8px; }
+.epic-strip button.sprint-name { font-weight: 600; color: var(--vscode-foreground); text-align: left; }
+.epic-strip .count { min-width: 2.5em; text-align: right; }
+.key { padding: 0 6px; border-radius: 3px; font-family: var(--vscode-editor-font-family); font-size: 0.85em;
+  background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent); }
+
+.badge { padding: 1px 8px; border-radius: 10px; font-size: 0.85em; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); white-space: nowrap; }
+.badge.stage-awaitingPlanApproval, .badge.stage-awaitingPrApproval, .badge.stage-paused, .badge.state-awaitingMerge { background: var(--accent); color: var(--accent-fg); }
+.badge.stage-ready, .badge.stage-done, .badge.state-merged { background: var(--c-done); color: #000; }
+.badge.stage-building, .badge.state-building, .badge.state-reviewing, .badge.state-fixing { background: var(--c-doing); color: #fff; }
+.badge.stage-failed, .badge.stage-cancelled, .badge.state-waiting { background: transparent; border: 1px solid var(--line); color: var(--vscode-descriptionForeground); }
 .error { color: var(--vscode-errorForeground); }
 .error:empty { display: none; }
-.epic-strip .sprints { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
-.epic-strip .sprint { padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius); }
-.epic-strip .sprint.needs { border-color: var(--accent); }
-.epic-strip .sprint .row + .row { margin-top: 6px; }
-.epic-strip input { font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background);
-  border: 1px solid var(--vscode-input-border, var(--line)); border-radius: var(--radius); padding: 4px 6px; }
-.epic-strip label.inline { display: flex; align-items: center; gap: 6px; }
-.epic-strip .reasons { margin: 6px 0 0; padding-left: 18px; color: var(--vscode-editorWarning-foreground, #cca700); }
-.badge.state-awaitingMerge { background: var(--accent); color: var(--accent-fg); }
-.badge.state-merged { background: var(--c-done); color: #000; }
-.badge.state-building, .badge.state-reviewing, .badge.state-fixing { background: var(--c-doing); color: #fff; }
-.badge.stage-building { background: var(--c-doing); color: #fff; }
-.epic-strip .epic-title { padding: 0; background: transparent; font-weight: 600; color: var(--vscode-textLink-foreground); }
-.epic-strip .epic-title:hover, .epic-strip .link:hover { text-decoration: underline; background: transparent; }
-.epic-strip .link small { color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family); }
-.epic-strip button.link { padding: 0 2px; background: transparent; }
+
+/* live factory activity on kanban cards */
+.story .live { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 0.85em; color: var(--vscode-descriptionForeground); }
+.tag.key { font-family: var(--vscode-editor-font-family); }
+
+/* sprint review panel */
+.epic-strip .panel { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 0; padding: 6px 10px; list-style: none; border-radius: var(--radius);
+  background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent); }
+.epic-strip .panel li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 26px; }
+.epic-strip .panel .mark { width: 8px; text-align: center; font-weight: 700; }
+.epic-strip .panel .pass .mark { color: var(--c-done); }
+.epic-strip .panel .fail .mark { color: var(--vscode-errorForeground); }
+.epic-strip .panel button { padding: 2px 10px; }
+.epic-strip .issues { margin: 6px 0 0; padding-left: 18px; font-size: 0.9em; color: var(--vscode-descriptionForeground); }
+
+/* epic form: reviewer checklist */
+.modal .hint { margin: 0; font-size: 0.85em; }
+.modal .checks { display: flex; flex-direction: column; gap: 4px; }
+.modal aside label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--vscode-foreground); font-size: 0.9em; }
+.modal aside label.check input { width: auto; margin: 0; }
+.modal aside h4 { margin: 8px 0 0; }

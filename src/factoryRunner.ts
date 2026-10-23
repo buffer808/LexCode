@@ -2,14 +2,14 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
-import { Epic, EpicStage, ModelChoice, ModelRole, Project, Sprint, Story, Store } from './store';
-import { AgentWatcher, launchBackground } from './claude';
+import { Epic, EpicStage, ModelChoice, ModelRole, PrVia, Project, Role, Sprint, SprintReview, Story, Store } from './store';
+import { AgentWatcher, launchBackground, terminalSession } from './claude';
 import { finalMessage } from './sessions';
 import { discoverAgents, bundledRolePrompt, resolveRoles, worktreeArgs } from './agents';
 import * as git from './git';
 import {
   Action, EpicInput, NEXT_STAGE, PLANNING, STAGE_LABEL, STAGE_ROLE, applyPlan, builderPrompt, conflictIssue, criticalReasons,
-  epicBranch, fixPrompt, nextActions, parseStageOutput, parseVerdict, planFile, readPlan, reviewPrompt, sessionArgs,
+  epicBranch, finished, fixPrompt, mergeVerdicts, nextActions, parseStageOutput, parseVerdict, planFile, readPlan, reviewLabel, reviewPanel, reviewPrompt, sessionArgs,
   sprintBranch, sprintFixPrompt, sprintReviewPrompt, stageArgs, stagePrompt, storiesOf, tryLock, worktreeDir, writePlan,
 } from './factory';
 
@@ -20,7 +20,8 @@ export type Decision =
   | { decision: 'approveMerge' | 'retrySprint'; sprintId: string }
   | { decision: 'sendBack'; sprintId: string; text: string }
   | { decision: 'retryStory' | 'skipStory'; storyId: string }
-  | { decision: 'createPr'; targetBranch?: string };
+  | { decision: 'createPr'; targetBranch?: string; via?: PrVia | 'auto'; skill?: string }
+  | { decision: 'prOpened'; url: string };
 
 // Drives factory epics: plan → revalidate → security → plan gate → build/review loop → merges → PR gate.
 // State lives on the epic/sprints/stories in board.json, so a reload picks up where it left off.
@@ -43,23 +44,38 @@ export class FactoryRunner implements vscode.Disposable {
   private epic = (id: string) => { this.store.reload(); return this.store.all().epics.find(e => e.id === id); };
   private lock = (e: Epic) => tryLock(path.join(this.lockDir, `${e.id}.lock`), this.owner);
 
-  // New factory epic (or an existing manual one, by id): freezes role → agent mapping and the base branch, then plans.
+  // New factory epic (or an existing manual one, by id): freezes role → agent mapping, cuts the epic branch from the
+  // PR target into its own worktree, then plans there, so plan, build and PR all start from the target branch.
   async create(project: Project, input: EpicInput, existingId?: string): Promise<Epic> {
-    let baseBranch: string;
-    try { baseBranch = await git.currentBranch(project.path); } catch {
+    try { await git.currentBranch(project.path); } catch {
       throw new Error(`${project.name} is not a git repository; the factory needs git for epic branches and PRs.`);
     }
+    const targetBranch = input.targetBranch ?? this.settings().get('targetBranch', 'main');
+    let baseBranch: string;
+    try { baseBranch = await git.resolveBase(project.path, targetBranch); }
+    catch (e: any) { throw new Error(`Can't cut the epic branch: ${e.message}. Pick an existing PR target branch.`); }
     await git.excludeLexcode(project.path);
     const fields = {
       title: input.title, description: input.description, stage: 'planning' as const,
-      baseBranch, targetBranch: input.targetBranch ?? this.settings().get('targetBranch', 'main'),
-      builderMode: input.builderMode, models: input.models, roleAgents: input.roleAgents,
+      baseBranch, targetBranch,
+      builderMode: input.builderMode, models: input.models, roleAgents: input.roleAgents, reviewers: input.reviewers,
     };
     if (existingId) this.store.update('epics', existingId, fields);
     const epic = existingId ? this.epic(existingId)! : this.store.add('epics', { projectId: project.id, ...fields });
-    await this.launch(epic, 'planning');
-    return epic;
+    this.store.update('epics', epic.id, { branch: epic.branch ?? epicBranch(epic) }); // launch() creates its worktree
+    await this.launch(this.epic(epic.id)!, 'planning');
+    return this.epic(epic.id)!;
   }
+
+  // Planning runs in the epic worktree (the target branch's code). Epics from before epic branches were cut at
+  // creation have no branch until the build starts, so they plan in the project root as before.
+  private async epicCwd(project: Project, epic: Epic) {
+    if (!epic.branch) return project.path;
+    const wt = worktreeDir(project.path, epic.id);
+    await git.addWorktree(project.path, wt, epic.branch, epic.baseBranch ?? 'HEAD'); // no-op when it exists
+    return wt;
+  }
+  private stageExtra = (project: Project, cwd: string) => cwd === project.path ? [] : worktreeArgs(project.path, cwd);
 
   detectedRoles = (project: Project) => resolveRoles(project.path);
 
@@ -76,8 +92,9 @@ export class FactoryRunner implements vscode.Disposable {
       const prompt = stagePrompt(stage, epic, { plan, feedback: epic.feedback, collaborators: defs,
         roleBody: agent ? undefined : bundledRolePrompt(this.bundled, role) });
       this.store.update('epics', epic.id, { stage, stageSessionId: undefined, stageStartedAt: Date.now(), stageAttempts: 0, error: undefined, pending: undefined });
-      const sid = await launchBackground(project, stageArgs(stage, epic, prompt, this.models(), agent));
-      this.store.update('epics', epic.id, sid ? { stageSessionId: sid } : { error: `Claude doesn't trust ${project.path} yet; accept the trust prompt, then Retry.` });
+      const cwd = await this.epicCwd(project, epic);
+      const sid = await launchBackground(project, stageArgs(stage, epic, prompt, this.models(), agent, undefined, this.stageExtra(project, cwd)), cwd);
+      this.store.update('epics', epic.id, sid ? { stageSessionId: sid } : { error: `Claude doesn't trust ${cwd} yet; accept the trust prompt, then Retry.` });
       this.agents.poll();
     } catch (e: any) {
       this.store.update('epics', epic.id, { error: `${STAGE_LABEL[stage]}: ${e.message}` });
@@ -113,7 +130,8 @@ export class FactoryRunner implements vscode.Disposable {
     const project = this.project(epic)!;
     const stage = epic.stage!;
     let plan;
-    try { plan = parseStageOutput(finalMessage(project.path, epic.stageSessionId!, undefined, epic.stageStartedAt)); }
+    const cwd = await this.epicCwd(project, epic);
+    try { plan = parseStageOutput(finalMessage(cwd, epic.stageSessionId!, undefined, epic.stageStartedAt)); }
     catch (e: any) {
       if ((epic.stageAttempts ?? 0) >= 1) {
         this.store.update('epics', epic.id, { error: `${STAGE_LABEL[stage]} returned an invalid plan: ${e.message}` });
@@ -127,8 +145,8 @@ export class FactoryRunner implements vscode.Disposable {
         const agent = discoverAgents(project.path).find(a => a.name === epic.roleAgents?.[STAGE_ROLE[stage]!]);
         const fix = `Your last reply could not be used: ${e.message}. Reply again with the complete plan as exactly one \`\`\`json block in the required shape.`;
         this.store.update('epics', epic.id, { stageAttempts: 1, stageStartedAt: Date.now() });
-        const sid = await launchBackground(project, stageArgs(stage, epic, fix, this.models(), agent, epic.stageSessionId));
-        this.store.update('epics', epic.id, sid ? { stageSessionId: sid } : { error: `Claude doesn't trust ${project.path}` });
+        const sid = await launchBackground(project, stageArgs(stage, epic, fix, this.models(), agent, epic.stageSessionId, this.stageExtra(project, cwd)), cwd);
+        this.store.update('epics', epic.id, sid ? { stageSessionId: sid } : { error: `Claude doesn't trust ${cwd}` });
         this.agents.poll();
       } catch (err: any) {
         this.store.update('epics', epic.id, { error: `${STAGE_LABEL[stage]}: ${err.message}` });
@@ -222,7 +240,7 @@ export class FactoryRunner implements vscode.Disposable {
           // Review kept failing → one more fix round with the last issues; anything else → redo the step that failed.
           const fix = sprint.state === 'reviewing' && sprint.issues?.length && (sprint.attempts ?? 0) >= this.maxAttempts();
           this.store.update('sprints', sprint.id, { blocked: undefined, attempts: 0, fixups: 0,
-            ...(!fix && ['reviewing', 'fixing'].includes(sprint.state!) ? { state: 'reviewing' as const, sessionId: undefined } : {}) });
+            ...(!fix && ['reviewing', 'fixing'].includes(sprint.state!) ? { state: 'reviewing' as const, sessionId: undefined, reviews: undefined } : {}) });
           if (fix) await this.fixSprint(epic, project, sprint, sprint.issues!);
           break;
         }
@@ -239,7 +257,8 @@ export class FactoryRunner implements vscode.Disposable {
         case 'skipStory':
           if (story?.blocked) this.store.update('stories', story.id, { status: 'done', blocked: undefined, reviewNotes: 'Skipped by a human.' });
           break;
-        case 'createPr': if (epic.stage === 'awaitingPrApproval') await this.createPr(epic, project, d.targetBranch); break;
+        case 'createPr': if (epic.stage === 'awaitingPrApproval' && !this.launching.has(epic.id)) await this.createPr(epic, project, d); break;
+        case 'prOpened': if (epic.stage === 'awaitingPrApproval') await this.prOpened(epic, project, d.url); break;
       }
     } catch (e: any) {
       vscode.window.showErrorMessage(`LexCode factory · ${epic.title}: ${e.message}`);
@@ -252,10 +271,11 @@ export class FactoryRunner implements vscode.Disposable {
 
   private storyById = (id: string) => { this.store.reload(); return this.store.all().stories.find(s => s.id === id); };
   private maxAttempts = () => Math.max(1, this.settings().get('maxReviewAttempts', 3));
-  private agentFor(project: Project, epic: Epic, role: 'builder' | 'reviewer') {
+  // name: a specific agent (review panel); otherwise the epic's agent for `role`. No agent → bundled prompt for `bundled`.
+  private agentFor(project: Project, epic: Epic, role: Role, name = epic.roleAgents?.[role], bundled: Role = role) {
     const defs = discoverAgents(project.path);
-    const agent = defs.find(a => a.name === epic.roleAgents?.[role]);
-    return { defs, agent, roleBody: agent ? undefined : bundledRolePrompt(this.bundled, role) };
+    const agent = defs.find(a => a.name === name);
+    return { defs, agent, roleBody: agent ? undefined : bundledRolePrompt(this.bundled, bundled) };
   }
   private needsHuman(epic: Epic, what: string) {
     vscode.window.showWarningMessage(`LexCode factory · ${epic.title}: ${what}`, 'Open dashboard')
@@ -354,44 +374,66 @@ export class FactoryRunner implements vscode.Disposable {
     this.store.update('stories', story.id, { reviewerSessionId: sid });
   }
 
-  // Unusable reviewer output: one correction round in the same session, then a human.
-  private async correct(project: Project, sp: Sprint, epic: Epic, target: { coll: 'stories'; item: Story } | { coll: 'sprints'; item: Sprint }, err: string) {
-    const sid = target.coll === 'stories' ? target.item.reviewerSessionId! : target.item.sessionId!;
-    const save = (patch: Partial<Story & Sprint>) => this.store.update(target.coll, target.item.id, patch);
-    if ((target.item.fixups ?? 0) >= 1) {
-      save({ blocked: `Reviewer returned an unusable verdict: ${err}` });
-      return this.needsHuman(epic, `reviewer output for ${sp.name} was unusable (${err}).`);
-    }
-    save({ fixups: 1, runStartedAt: Date.now() });
-    const { agent } = this.agentFor(project, epic, 'reviewer');
-    const next = await this.launchIn(project, sp, sessionArgs(epic, 'reviewer',
+  // Unusable reviewer output: resume the same session once asking for the verdict again (the caller blocks after that).
+  private reprompt(project: Project, sp: Sprint, epic: Epic, role: Role, name: string | undefined, sid: string, err: string) {
+    const { agent } = this.agentFor(project, epic, role, name);
+    return this.launchIn(project, sp, sessionArgs(epic, role,
       `Your last reply could not be used: ${err}. Reply again with your verdict as exactly one \`\`\`json block in the required shape.`,
       this.models(), { mode: 'plan', agent, extra: worktreeArgs(project.path, sp.worktree!), resumeId: sid }));
-    save(target.coll === 'stories' ? { reviewerSessionId: next } : { sessionId: next });
   }
 
   private async verdict(epic: Epic, project: Project, sp: Sprint, story: Story) {
     let v;
     try { v = parseVerdict(finalMessage(sp.worktree!, story.reviewerSessionId!, undefined, story.runStartedAt)); }
-    catch (e: any) { return this.correct(project, sp, epic, { coll: 'stories', item: story }, e.message); }
+    catch (e: any) {
+      if ((story.fixups ?? 0) >= 1) {
+        this.store.update('stories', story.id, { blocked: `Reviewer returned an unusable verdict: ${e.message}` });
+        return this.needsHuman(epic, `reviewer output for "${story.title}" was unusable (${e.message}).`);
+      }
+      this.store.update('stories', story.id, { fixups: 1, runStartedAt: Date.now() });
+      const sid = await this.reprompt(project, sp, epic, 'reviewer', epic.roleAgents?.reviewer, story.reviewerSessionId!, e.message);
+      return this.store.update('stories', story.id, { reviewerSessionId: sid });
+    }
     if (!v.pass) return this.bounce(epic, project, sp, story, v.issues);
     this.store.update('stories', story.id, { status: 'done', reviewNotes: v.issues.join('\n') || undefined });
   }
 
+  // Sprint review panel: revalidator, security and every picked reviewer look at the sprint diff in parallel.
   private async reviewSprint(epic: Epic, project: Project, sp: Sprint) {
     const diff = await git.diff(sp.worktree!, epic.branch!, sp.branch!);
-    const { defs, agent, roleBody } = this.agentFor(project, epic, 'reviewer');
-    this.store.update('sprints', sp.id, { state: 'reviewing', runStartedAt: Date.now(), sessionId: undefined, fixups: 0 });
-    const sid = await this.launchIn(project, sp, sessionArgs(epic, 'reviewer',
-      sprintReviewPrompt(epic, sp, storiesOf(this.store.all(), sp), diff, { roleBody, collaborators: defs, projectPath: project.path }),
-      this.models(), { mode: 'plan', agent, extra: worktreeArgs(project.path, sp.worktree!), name: `LexCode · ${sp.name} · sprint review` }));
-    this.store.update('sprints', sp.id, { sessionId: sid });
+    const stories = storiesOf(this.store.all(), sp);
+    const reviews = reviewPanel(epic);
+    this.store.update('sprints', sp.id, { state: 'reviewing', sessionId: undefined, reviews });
+    for (const r of reviews) {
+      // Mapped project agent runs as itself; otherwise the bundled reviewer prompt with this lens's focus.
+      const { defs, agent, roleBody } = this.agentFor(project, epic, r.lens, r.agent, 'reviewer');
+      r.startedAt = Date.now();
+      r.sessionId = await this.launchIn(project, sp, sessionArgs(epic, r.lens,
+        sprintReviewPrompt(epic, sp, stories, diff, r.lens, { roleBody, collaborators: defs, projectPath: project.path, self: r.agent }),
+        this.models(), { mode: 'plan', agent, extra: worktreeArgs(project.path, sp.worktree!), name: `LexCode · ${sp.name} · ${reviewLabel(r)}` }));
+      this.store.update('sprints', sp.id, { reviews });
+    }
   }
 
+  // Reads each finished panel reviewer's verdict; once all are in, merge, gate or send back to a fix round.
   private async sprintVerdict(epic: Epic, project: Project, sp: Sprint) {
-    let v;
-    try { v = parseVerdict(finalMessage(sp.worktree!, sp.sessionId!, undefined, sp.runStartedAt)); }
-    catch (e: any) { return this.correct(project, sp, epic, { coll: 'sprints', item: sp }, e.message); }
+    const reviews: SprintReview[] = sp.reviews!.map(r => ({ ...r }));
+    for (const r of reviews) {
+      if (r.verdict || !finished(this.agents.agents, r.sessionId, r.startedAt)) continue;
+      try { r.verdict = parseVerdict(finalMessage(sp.worktree!, r.sessionId!, undefined, r.startedAt)); }
+      catch (e: any) {
+        if ((r.fixups ?? 0) >= 1) {
+          this.store.update('sprints', sp.id, { reviews, blocked: `${reviewLabel(r)} returned an unusable verdict: ${e.message}` });
+          return this.needsHuman(epic, `${reviewLabel(r)} output for ${sp.name} was unusable (${e.message}).`);
+        }
+        r.fixups = 1;
+        r.startedAt = Date.now();
+        r.sessionId = await this.reprompt(project, sp, epic, r.lens, r.agent, r.sessionId!, e.message);
+      }
+    }
+    this.store.update('sprints', sp.id, { reviews });
+    if (!reviews.every(r => r.verdict)) return;
+    const v = mergeVerdicts(reviews);
     this.store.update('sprints', sp.id, { risk: v.risk, issues: v.issues });
     if (!v.pass) {
       const attempts = (sp.attempts ?? 0) + 1;
@@ -403,7 +445,7 @@ export class FactoryRunner implements vscode.Disposable {
       return this.fixSprint(epic, project, sp, v.issues);
     }
     const changed = await git.changedFiles(sp.worktree!, epic.branch!, sp.branch!);
-    const reasons = criticalReasons(sp, v, changed, this.settings().get<string[]>('sensitivePaths', []), readPlan(project.path, epic.id));
+    const reasons = criticalReasons(sp, reviews, changed, this.settings().get<string[]>('sensitivePaths', []), readPlan(project.path, epic.id));
     if (reasons.length) {
       this.store.update('sprints', sp.id, { state: 'awaitingMerge', critical: reasons });
       return this.needsHuman(epic, `${sp.name} is reviewed; merging needs your approval (${reasons[0]}).`);
@@ -413,7 +455,7 @@ export class FactoryRunner implements vscode.Disposable {
 
   private async fixSprint(epic: Epic, project: Project, sp: Sprint, issues: string[]) {
     const { agent } = this.agentFor(project, epic, 'builder');
-    this.store.update('sprints', sp.id, { state: 'fixing', runStartedAt: Date.now(), sessionId: undefined, critical: undefined });
+    this.store.update('sprints', sp.id, { state: 'fixing', runStartedAt: Date.now(), sessionId: undefined, critical: undefined, reviews: undefined });
     const sid = await this.launchIn(project, sp, sessionArgs(epic, 'builder', sprintFixPrompt(epic, sp, issues), this.models(), {
       mode: epic.builderMode ?? 'acceptEdits', agent, extra: worktreeArgs(project.path, sp.worktree!), name: `LexCode · ${sp.name} · fix` }));
     this.store.update('sprints', sp.id, { sessionId: sid });
@@ -426,20 +468,50 @@ export class FactoryRunner implements vscode.Disposable {
       return this.needsHuman(epic, `${sp.name} conflicts with ${epic.branch}. Send it back to a builder to resolve, or resolve it yourself and approve.`);
     }
     await git.removeWorktree(project.path, sp.worktree!);
+    await this.dropBranch(epic, project, sp);
     this.store.update('sprints', sp.id, { state: 'merged', worktree: undefined, critical: undefined, sessionId: undefined });
   }
 
-  private async createPr(epic: Epic, project: Project, target?: string) {
-    const base = target?.trim() || epic.targetBranch || 'main';
+  // Merged sprint branch is no longer needed; `-d` from the epic worktree only deletes it if it really is merged there.
+  private async dropBranch(epic: Epic, project: Project, sp: Sprint) {
+    if (!sp.branch || !await git.branchExists(project.path, sp.branch)) return;
+    try { await git.deleteBranch(worktreeDir(project.path, epic.id), sp.branch); }
+    catch (e: any) { console.warn(`LexCode: kept ${sp.branch}: ${e.message}`); }
+  }
+
+  private async createPr(epic: Epic, project: Project, d: { targetBranch?: string; via?: PrVia | 'auto'; skill?: string }) {
+    const base = d.targetBranch?.trim() || epic.targetBranch || 'main';
+    const via: PrVia = d.via && d.via !== 'auto' ? d.via
+      : /github\.com/.test(await git.remoteUrl(project.path).catch(() => '')) ? 'gh' : 'tea';
+    if (via === 'skill' && !d.skill) throw new Error('Pick the skill that opens the PR.');
+    this.store.update('projects', project.id, { pr: { via, skill: d.skill ?? project.pr?.skill } }); // preselected next time
+    this.store.update('epics', epic.id, { targetBranch: base, pending: { kind: 'pr', busy: Date.now() } });
+    this.refresh();
+    this.launching.add(epic.id);
     const wt = worktreeDir(project.path, epic.id);
-    const plan = readPlan(project.path, epic.id);
-    const body = [epic.description, plan && `## Plan\n${plan.summary}`, plan && plan.sprints.map(s => `- **${s.key}: ${s.name}**: ${s.stories.map(t => t.title).join('; ')}`).join('\n'),
-      '🏭 Built by the LexCode software factory'].filter(Boolean).join('\n\n');
-    await git.push(wt, epic.branch!);
-    const url = await git.createPr(wt, base, epic.branch!, epic.title, body);
-    await git.removeWorktree(project.path, wt);
-    this.store.update('epics', epic.id, { stage: 'done', pending: undefined, prUrl: url.split('\n').pop(), targetBranch: base });
-    vscode.window.showInformationMessage(`PR opened for "${epic.title}"`, 'Open PR').then(c => c && vscode.env.openExternal(vscode.Uri.parse(url.split('\n').pop()!)));
+    try {
+      await git.push(wt, epic.branch!);
+      if (via === 'skill') {
+        // Skills draft the PR with you and ask before creating it, so they run interactively; you hand back the URL.
+        terminalSession(project, `/${d.skill} ${base} ${epic.branch}`);
+        this.store.update('epics', epic.id, { pending: { kind: 'pr', skill: d.skill } });
+        return;
+      }
+      const plan = readPlan(project.path, epic.id);
+      const body = [epic.description, plan && `## Plan\n${plan.summary}`, plan && plan.sprints.map(s => `- **${s.key}: ${s.name}**: ${s.stories.map(t => t.title).join('; ')}`).join('\n'),
+        '🏭 Built by the LexCode software factory'].filter(Boolean).join('\n\n');
+      await this.prOpened(epic, project, await git.createPr(wt, via, base, epic.branch!, epic.title, body));
+    } catch (e: any) {
+      this.store.update('epics', epic.id, { pending: { kind: 'pr', reason: e.message } }); // shown in the PR gate
+    } finally { this.launching.delete(epic.id); }
+  }
+
+  private async prOpened(epic: Epic, project: Project, url: string) {
+    // Sprint branches merged before branch cleanup existed; then the epic worktree (the epic branch stays: it's the PR head).
+    for (const sp of this.store.all().sprints.filter(s => s.epicId === epic.id && s.state === 'merged')) await this.dropBranch(epic, project, sp);
+    await git.removeWorktree(project.path, worktreeDir(project.path, epic.id));
+    this.store.update('epics', epic.id, { stage: 'done', pending: undefined, prUrl: url });
+    vscode.window.showInformationMessage(`PR opened for "${epic.title}"`, 'Open PR').then(c => c && vscode.env.openExternal(vscode.Uri.parse(url)));
   }
 
   dispose() { clearInterval(this.timer); this.sub.dispose(); }

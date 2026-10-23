@@ -16,7 +16,7 @@ function h(tag, props, ...kids) {
     if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
     else if (v !== undefined && v !== false) el.setAttribute(k, v);
   }
-  for (const k of kids.flat()) if (k != null && k !== false) el.append(k);
+  for (const k of kids.flat(Infinity)) if (k != null && k !== false) el.append(k);
   return el;
 }
 
@@ -58,11 +58,14 @@ function render() {
 
   app.append(h('section', { class: 'cards' }, projects.map(p => {
     const active = sprints.find(s => s.projectId === p.id && s.active);
+    // No manual sprint running: open on the factory epic that is building, so its stories are on the board.
+    const running = !active && epics.find(e => e.projectId === p.id && RUNNING.includes(e.stage));
     const open = stories.filter(s => s.projectId === p.id && s.status !== 'done').length;
     const total = stories.filter(s => s.projectId === p.id).length;
-    return h('button', { class: 'card' + (p.id === sel.projectId ? ' selected' : ''), onclick: () => select(p.id, active?.id ?? null) },
+    return h('button', { class: 'card' + (p.id === sel.projectId ? ' selected' : ''),
+      onclick: () => running ? select(p.id, ALL, running.id) : select(p.id, active?.id ?? null) },
       h('strong', {}, p.name),
-      h('span', { class: 'sub' }, `${active ? active.name : 'no active sprint'} · ${open} open`),
+      h('span', { class: 'sub' }, `${active ? active.name : running ? `⚙ ${running.title}` : 'no active sprint'} · ${open} open`),
       h('div', { class: 'bar', title: `${total - open}/${total} done` }, fill(total ? (total - open) / total : 0)),
       h('span', { class: 'sub' }, ago(data.sessions[p.id]?.[0]?.mtime)));
   }), h('button', { class: 'card', onclick: () => vscode.postMessage({ type: 'addProject' }) }, h('strong', {}, '+ Add project'))));
@@ -77,7 +80,8 @@ function render() {
   const picker = h('select', { onchange: e => select(project.id, e.target.value || null, sel.epicId) },
     h('option', { value: '' }, 'Backlog'),
     h('option', { value: ALL, selected: sel.sprintId === ALL }, 'All sprints'),
-    projSprints.map(s => h('option', { value: s.id, selected: s.id === sel.sprintId }, s.name + (s.active ? ' (active)' : ''))));
+    projSprints.map(s => h('option', { value: s.id, selected: s.id === sel.sprintId },
+      s.name + (s.active ? ' (active)' : !['waiting', 'merged', undefined].includes(s.state) ? ` · ${SPRINT_STATE[s.state]}` : ''))));
 
   const projEpics = epics.filter(e => e.projectId === project.id);
   const epicFilter = h('select', { 'aria-label': 'Filter by epic', onchange: e => select(project.id, sel.sprintId, e.target.value || null) },
@@ -131,15 +135,22 @@ function render() {
           onclick: () => vscode.postMessage({ type: 'archiveDone', ids: inView.filter(s => s.status === 'done' && !s.archived).map(s => s.id) }) }, ' · archive'))),
       !inView.some(s => s.status === status) && h('div', { class: 'none' }, 'Drop here'),
       inView.filter(s => s.status === status).map(s => {
-        const epic = epics.find(e => e.id === s.epicId);
-        const n = s.sessionIds?.length ?? 0;
-        const blocked = [...(s.sessionIds ?? []), s.builderSessionId, s.reviewerSessionId].some(id => id && data.agents[id]?.state === 'blocked');
-        const claude = claudeButton(s, n);
+        const epic = s.epicId !== sel.epicId && epics.find(e => e.id === s.epicId); // no tag when the board is already that epic
+        const sprint = s.sprintId && sprints.find(x => x.id === s.sprintId && x.epicId);
+        const run = liveRun(s), live = sessionState(run?.id);
+        const n = storySessions(s).length;
+        const blocked = live === 'blocked';
+        const claude = run
+          ? h('button', { class: 'claude' + (blocked ? ' start' : ''), title: 'Open the background run in a terminal to watch or approve',
+              onclick: e => { e.stopPropagation(); vscode.postMessage({ type: 'attach', id: s.id, sessionId: run.id }); } }, blocked ? '⚠ Approve…' : 'Attach')
+          : claudeButton(s, s.sessionIds?.length ?? 0);
         return h('div', { class: 'story' + (blocked ? ' needs' : '') + (s.archived ? ' archived' : ''), draggable: 'true', tabindex: '0', role: 'button',
           onclick: () => openStory(s.id), onkeydown: e => { if (e.key === 'Enter') openStory(s.id); },
           ondragstart: e => e.dataTransfer.setData('text/plain', s.id) },
           h('div', {}, s.title),
+          run && !blocked && h('div', { class: 'live' }, dot(live), run.role || 'Background run', ` · ${live}`),
           h('div', { class: 'meta' },
+            sprint && h('span', { class: 'tag key', title: sprint.name }, sprint.key ?? sprint.name),
             epic && h('span', { class: 'tag' }, epic.title),
             s.points != null && h('span', {}, `${s.points}pt`),
             s.blocked && h('span', { class: 'error', title: s.blocked }, '⛔ needs you'),
@@ -155,111 +166,208 @@ function render() {
 }
 
 /* ---------- software factory ---------- */
-const ROLE_LABELS = { orchestrator: 'Orchestrator (plans)', revalidator: 'Revalidator', security: 'Security check', builder: 'Builder', reviewer: 'Reviewer' };
+const ROLE_LABELS = { orchestrator: 'Orchestrator (plans)', revalidator: 'Revalidator', security: 'Security', builder: 'Builder' };
 const STAGE_ROLE = { planning: 'orchestrator', revalidating: 'revalidator', securityCheck: 'security' };
 const MODEL_ROLES = { planner: 'Planner (plan, revalidate, security)', builder: 'Builder', reviewer: 'Reviewer' };
 const MODELS = ['opus', 'sonnet', 'haiku', 'fable'];
 const drafts = {}; // epic id → unsent "request changes" text; survives board re-renders
 const gate = (epicId, decision, text, extra) => { if (decision === 'changes') delete drafts[epicId]; vscode.postMessage({ type: 'factoryGate', epicId, decision, text, ...extra }); };
 
+const STAGE_VERB = { planning: 'is planning sprints and stories', revalidating: 'is revalidating the plan', securityCheck: 'is checking security' };
+const RUNNING = ['building', 'paused', 'awaitingPrApproval'];
+const LENS = { revalidator: 'Revalidate', security: 'Security', reviewer: 'Review' };
+const ORDER = ['planning', 'revalidating', 'securityCheck', 'awaitingPlanApproval', 'ready', 'building', 'paused', 'awaitingPrApproval', 'done'];
+const reviewerNames = e => (e.reviewers?.length ? e.reviewers : [e.roleAgents?.reviewer ?? '']).map(n => n || 'LexCode reviewer');
+
+const dot = state => h('i', { class: 'dot ' + (state ?? 'starting'), 'aria-hidden': 'true' });
+const sessionState = sid => sid && data.agents[sid]?.state;
+// Every session on a story: ones you started or linked, plus the factory's builder and reviewer.
+const storySessions = s => [...(s.sessionIds ?? []).map(id => ({ id, role: '' })),
+  { id: s.builderSessionId, role: 'Builder' }, { id: s.reviewerSessionId, role: 'Reviewer' }].filter(x => x.id);
+// The story's background run still in progress, preferring one that waits for approval.
+const liveRun = s => {
+  const live = storySessions(s).reverse().filter(x => data.agents[x.id] && !['done', 'stopped', 'failed'].includes(data.agents[x.id].state));
+  return live.find(x => data.agents[x.id].state === 'blocked') ?? live[0];
+};
+const attachBtn = (e, sid, label) => sessionState(sid) && h('button', { class: sessionState(sid) === 'blocked' ? 'primary' : '',
+  onclick: () => vscode.postMessage({ type: 'attachEpic', epicId: e.id, sessionId: sid }) }, sessionState(sid) === 'blocked' ? '⚠ Approve…' : label);
+const activity = (state, text, ...actions) => h('div', { class: 'activity' + (state === 'blocked' ? ' needs' : '') },
+  dot(state), h('span', { class: 'what' }, text), h('span', { class: 'muted' }, state === 'blocked' ? 'needs approval' : state ?? 'starting…'),
+  h('span', { class: 'spacer' }), actions);
+
+// Planning (plan → revalidate → security) → Approval → Build → Review (revalidate + security + reviewers, per sprint) → PR.
+// Build and Review overlap: each sprint is reviewed as soon as its stories are built.
+function stepper(e) {
+  const at = ORDER.indexOf(e.stage); // -1: failed / cancelled
+  const sp = data.board.sprints.filter(s => s.epicId === e.id);
+  const inBuild = ['ready', 'building', 'paused'].includes(e.stage);
+  const built = sp.length > 0 && sp.every(s => ['reviewing', 'awaitingMerge', 'merged'].includes(s.state));
+  const reviewing = sp.some(s => ['reviewing', 'awaitingMerge'].includes(s.state));
+  const needs = e.error || e.stage.startsWith('awaiting') || sp.some(s => s.blocked || s.state === 'awaitingMerge');
+  const steps = [
+    ['Planning', at > 2 ? 'done' : at >= 0 ? 'current' : '',
+      h('small', {}, ['Plan', 'Revalidate', 'Security'].map((l, i) => [i ? ' → ' : '', h('span', { class: at > i ? 'done' : at === i ? 'current' : '' }, l)]))],
+    ['Approval', at > 3 ? 'done' : at === 3 ? 'current' : ''],
+    ['Build', at > 6 || built ? 'done' : inBuild ? 'current' : ''],
+    ['Review', at > 6 ? 'done' : inBuild && (reviewing || built) ? 'current' : '',
+      h('small', {}, ['Revalidate', 'Security', ...reviewerNames(e)].join(' + '))],
+    ['PR', e.stage === 'done' ? 'done' : e.stage === 'awaitingPrApproval' ? 'current' : ''],
+  ];
+  return h('ol', { class: 'steps' + (at < 0 ? ' off' : ''), 'aria-label': 'Pipeline progress' }, steps.map(([label, st, detail]) =>
+    h('li', { class: st + (st === 'current' && needs ? ' needs' : ''), 'aria-current': st === 'current' ? 'step' : undefined },
+      h('span', { class: 'label' }, label), detail)));
+}
+
+// Sprint review panel: one line per reviewer with its live state or verdict.
+function reviewPanel(e, sp) {
+  return h('ul', { class: 'panel', 'aria-label': 'Sprint reviewers' }, (sp.reviews ?? []).map(r => {
+    const state = sessionState(r.sessionId);
+    const v = r.verdict;
+    return h('li', { class: v ? (v.pass ? 'pass' : 'fail') : '' },
+      v ? h('span', { class: 'mark', 'aria-hidden': 'true' }, v.pass ? '✓' : '✗') : dot(state),
+      h('span', { class: 'what' }, h('strong', {}, LENS[r.lens]), ' · ', r.agent ?? 'LexCode ' + r.lens),
+      v ? h('span', { class: 'muted', title: v.issues.join('\n') }, (v.pass ? 'passed' : `${v.issues.length} issue${v.issues.length === 1 ? '' : 's'}`) + (v.risk === 'critical' ? ' · ⚠ critical' : ''))
+        : h('span', { class: 'muted' }, state === 'blocked' ? 'needs approval' : state ?? 'starting…'),
+      h('span', { class: 'spacer' }),
+      !v && attachBtn(e, r.sessionId, 'Attach'));
+  }));
+}
+
 function epicStrip(e) {
   const f = data.factory;
   const role = STAGE_ROLE[e.stage];
-  const agent = e.stageSessionId && data.agents[e.stageSessionId];
-  const planning = !!role;
+  const plan = f.plans[e.id];
+  const own = data.board.sprints.some(s => s.epicId === e.id);
+  const onBoard = sel.epicId === e.id && sel.sprintId === ALL;
+  const openPlan = source => vscode.postMessage({ type: 'openPlan', epicId: e.id, source });
   const changes = h('textarea', { 'data-key': 'changes-' + e.id, rows: '2', placeholder: 'What should change? (sent back to the orchestrator)', 'aria-label': 'Requested plan changes',
     oninput: ev => { drafts[e.id] = ev.target.value; } });
   changes.value = drafts[e.id] ?? '';
-  return h('div', { class: 'epic-strip' + (e.pending || e.error ? ' needs' : '') },
-    h('div', { class: 'row' },
-      f.plans[e.id]
-        ? h('button', { class: 'link epic-title', title: `Open ${f.plans[e.id]}`, onclick: () => vscode.postMessage({ type: 'openPlan', epicId: e.id, source: true }) }, e.title)
-        : h('strong', {}, e.title),
-      h('span', { class: 'badge stage-' + e.stage }, f.stages[e.stage] ?? e.stage),
-      h('span', { class: 'badge', title: e.builderMode === 'auto' ? 'Builders run unattended' : 'Builders pause for shell approvals' },
-        e.builderMode === 'auto' ? '🤖 Full auto' : '🛡 Accept edits'),
-      planning && !e.error && h('span', { class: 'muted' }, `${e.roleAgents?.[role] ? `agent: ${e.roleAgents[role]}` : 'LexCode ' + role}${agent ? ` · ${agent.state}` : ' · starting…'}`),
-      h('span', { class: 'spacer' }),
-      f.plans[e.id] && h('button', { class: 'link', title: 'Open the plan file in an editor', onclick: () => vscode.postMessage({ type: 'openPlan', epicId: e.id, source: true }) },
-        h('small', {}, f.plans[e.id])),
-      f.plans[e.id] && h('button', { onclick: () => vscode.postMessage({ type: 'openPlan', epicId: e.id }) }, 'View plan'),
-      agent && planning && h('button', { class: agent.state === 'blocked' ? 'primary' : '', onclick: () => vscode.postMessage({ type: 'attachEpic', epicId: e.id }) },
-        agent.state === 'blocked' ? 'Approve…' : 'Attach'),
-      e.error && h('button', { class: 'primary', onclick: () => gate(e.id, 'retry') }, 'Retry'),
-      !['done', 'cancelled', 'awaitingPlanApproval'].includes(e.stage) && h('button', { class: 'link', onclick: () => gate(e.id, 'cancel') }, 'Cancel')),
-    e.error && h('p', { class: 'error' }, e.error),
+  return h('article', { class: 'epic-strip stage-' + e.stage + (e.pending || e.error || e.stage.startsWith('awaiting') ? ' needs' : '') },
+    h('div', { class: 'head' },
+      h('div', { class: 'titles' },
+        plan ? h('button', { class: 'link epic-title', title: `Open ${plan}`, onclick: () => openPlan(true) }, e.title) : h('strong', { class: 'epic-title' }, e.title),
+        h('div', { class: 'facts' },
+          h('span', { class: 'badge stage-' + e.stage }, f.stages[e.stage] ?? e.stage),
+          h('span', { title: e.builderMode === 'auto' ? 'Builders run unattended' : 'Builders pause for shell approvals' }, e.builderMode === 'auto' ? '🤖 Full auto' : '🛡 Accept edits'),
+          e.branch && h('span', { title: 'Epic branch → PR target' }, h('code', {}, e.branch), ` → ${e.targetBranch ?? f.targetBranch}`))),
+      h('div', { class: 'actions' },
+        own && h('button', { class: onBoard ? 'on' : '', 'aria-pressed': String(onBoard), title: 'Show this epic\'s stories on the board below',
+          onclick: () => onBoard ? select(e.projectId, null, null) : select(e.projectId, ALL, e.id) }, onBoard ? '✓ On board' : 'Show on board'),
+        plan && h('button', { onclick: () => openPlan(false) }, 'View plan'),
+        !['done', 'cancelled', 'awaitingPlanApproval'].includes(e.stage) && h('button', { class: 'quiet', onclick: () => gate(e.id, 'cancel') }, 'Cancel'))),
+    stepper(e),
+    role && !e.error && activity(sessionState(e.stageSessionId), `${e.roleAgents?.[role] ?? `LexCode ${role}`} ${STAGE_VERB[e.stage]}`,
+      attachBtn(e, e.stageSessionId, 'Attach')),
+    e.error && h('div', { class: 'alert' }, h('span', {}, e.error), h('span', { class: 'spacer' }), h('button', { class: 'primary', onclick: () => gate(e.id, 'retry') }, 'Retry')),
     ['ready', 'building', 'paused'].includes(e.stage) && buildControls(e),
-    ['building', 'paused', 'awaitingPrApproval'].includes(e.stage) && sprintRows(e),
+    RUNNING.includes(e.stage) && sprintRows(e),
     e.stage === 'awaitingPrApproval' && prGate(e),
     e.stage === 'done' && e.prUrl && h('p', {}, 'Pull request: ', h('a', { href: e.prUrl }, e.prUrl)),
-    e.stage === 'awaitingPlanApproval' && h('div', { class: 'row gate' }, changes,
-      h('button', { onclick: () => changes.value.trim() ? gate(e.id, 'changes', changes.value) : changes.focus() }, 'Request changes'),
-      h('button', { class: 'danger', onclick: () => gate(e.id, 'reject') }, 'Reject'),
-      h('button', { class: 'primary', onclick: () => gate(e.id, 'approve') }, 'Approve plan')));
+    e.stage === 'awaitingPlanApproval' && h('div', { class: 'gate' },
+      h('p', { class: 'prompt' }, 'The plan is ready. ', plan && h('button', { class: 'link', onclick: () => openPlan(false) }, 'Read it'), ', then approve or ask for changes.'),
+      h('div', { class: 'row' }, changes,
+        h('div', { class: 'stack' },
+          h('button', { class: 'primary', onclick: () => gate(e.id, 'approve') }, 'Approve plan'),
+          h('button', { onclick: () => changes.value.trim() ? gate(e.id, 'changes', changes.value) : changes.focus() }, 'Request changes'),
+          h('button', { class: 'quiet', onclick: () => gate(e.id, 'reject') }, 'Reject')))));
 }
-
-const sessionState = sid => sid && data.agents[sid]?.state;
-const attachBtn = (e, sid, label) => sessionState(sid) && h('button', { class: sessionState(sid) === 'blocked' ? 'primary' : '',
-  onclick: () => vscode.postMessage({ type: 'attachEpic', epicId: e.id, sessionId: sid }) }, sessionState(sid) === 'blocked' ? '⚠ Approve…' : label);
 
 function buildControls(e) {
   const workers = h('input', { type: 'number', min: '1', max: '8', value: e.workers ?? data.factory.workers ?? 1, class: 'pts', 'aria-label': 'Builders',
     onchange: ev => e.stage !== 'ready' && gate(e.id, 'workers', undefined, { workers: +ev.target.value }) });
   const { sprints, stories } = data.board;
   const sp = sprints.filter(s => s.epicId === e.id), st = stories.filter(s => s.epicId === e.id && !s.archived);
-  return h('div', { class: 'row gate' },
-    h('label', { class: 'inline' }, 'Builders', workers),
+  const done = st.filter(s => s.status === 'done').length;
+  return h('div', { class: 'row progress' },
+    h('div', { class: 'bar', title: `${done}/${st.length} stories done` }, fill(st.length ? done / st.length : 0)),
+    h('span', { class: 'muted' }, `${done}/${st.length} stories · ${sp.filter(s => s.state === 'merged').length}/${sp.length} sprints merged`
+      + (e.stage === 'paused' ? ' · paused: no new sessions start' : '')),
+    h('span', { class: 'spacer' }),
+    h('label', { class: 'inline', title: 'How many sprints may build at the same time' }, 'Builders', workers),
     e.stage === 'ready'
-      ? h('button', { class: 'primary', onclick: () => gate(e.id, 'start', undefined, { workers: +workers.value }) }, '▶ Start build')
-      : h('button', { onclick: () => gate(e.id, e.stage === 'paused' ? 'resume' : 'pause') }, e.stage === 'paused' ? '▶ Resume' : '⏸ Pause'),
-    h('span', { class: 'muted' }, `${sp.filter(s => s.state === 'merged').length}/${sp.length} sprints merged · ${st.filter(s => s.status === 'done').length}/${st.length} stories done`
-      + (e.stage === 'paused' ? ' · paused: no new sessions start' : '')));
+      ? h('button', { class: 'primary', onclick: () => { gate(e.id, 'start', undefined, { workers: +workers.value }); select(e.projectId, ALL, e.id); } }, '▶ Start build')
+      : h('button', { onclick: () => gate(e.id, e.stage === 'paused' ? 'resume' : 'pause') }, e.stage === 'paused' ? '▶ Resume' : '⏸ Pause'));
 }
 
 const SPRINT_STATE = { waiting: 'waiting', building: 'building', reviewing: 'sprint review', fixing: 'fixing', awaitingMerge: 'merge needs approval', merged: 'merged' };
 
 function sprintRows(e) {
   const { sprints, stories } = data.board;
-  const rows = sprints.filter(s => s.epicId === e.id && s.state !== 'merged').sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const rows = sprints.filter(s => s.epicId === e.id).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   if (!rows.length) return null;
-  return h('div', { class: 'sprints' }, rows.map(sp => {
+  return h('ol', { class: 'sprints' }, rows.map(sp => {
     const own = stories.filter(s => s.sprintId === sp.id && !s.archived);
+    const done = own.filter(s => s.status === 'done').length;
     const cur = own.find(s => s.status !== 'done');
     const curSid = cur && (cur.status === 'review' ? cur.reviewerSessionId : cur.builderSessionId);
+    const name = sp.key && sp.name.startsWith(sp.key + ': ') ? sp.name.slice(sp.key.length + 2) : sp.name;
+    const after = (sp.dependsOn ?? []).map(id => sprints.find(x => x.id === id)).filter(d => d && d.state !== 'merged').map(d => d.key ?? d.name);
     const note = h('textarea', { 'data-key': 'sendback-' + sp.id, rows: '2', placeholder: 'What should the builder fix before merging?', 'aria-label': 'Send back note',
       oninput: ev => { drafts[sp.id] = ev.target.value; } });
     note.value = drafts[sp.id] ?? '';
-    return h('div', { class: 'sprint' + (sp.blocked || sp.state === 'awaitingMerge' || cur?.blocked ? ' needs' : '') },
+    const state = sp.state ?? 'waiting';
+    return h('li', { class: `sprint state-${state}` + (sp.blocked || state === 'awaitingMerge' || cur?.blocked ? ' needs' : '') + (sel.sprintId === sp.id ? ' selected' : '') },
       h('div', { class: 'row' },
-        h('strong', {}, sp.name),
-        h('span', { class: 'badge state-' + (sp.state ?? 'waiting') }, SPRINT_STATE[sp.state ?? 'waiting']),
-        sp.parallel && h('span', { class: 'muted', title: 'Can run alongside other parallel sprints' }, '∥ parallel'),
-        h('span', { class: 'muted' }, `${own.filter(s => s.status === 'done').length}/${own.length} stories`),
-        sp.state === 'building' && cur && h('span', { class: 'muted' }, `${cur.status === 'review' ? 'reviewing' : 'building'}: ${cur.title}${cur.attempts ? ` (attempt ${cur.attempts + 1})` : ''}${sessionState(curSid) ? ` · ${sessionState(curSid)}` : ''}`),
+        sp.key && h('span', { class: 'key' }, sp.key),
+        h('button', { class: 'link sprint-name', title: 'Show this sprint on the board', onclick: () => select(e.projectId, sp.id, e.id) }, name),
+        h('span', { class: 'badge state-' + state }, SPRINT_STATE[state]),
+        sp.parallel && h('span', { class: 'muted', title: 'Can run alongside other parallel sprints' }, '⇉ parallel'),
+        state === 'waiting' && after.length > 0 && h('span', { class: 'muted' }, `after ${after.join(', ')}`),
         h('span', { class: 'spacer' }),
-        sp.state === 'building' && attachBtn(e, curSid, 'Attach'),
-        ['reviewing', 'fixing'].includes(sp.state) && attachBtn(e, sp.sessionId, 'Attach')),
-      sp.blocked && h('div', { class: 'row' }, h('span', { class: 'error' }, sp.blocked), h('span', { class: 'spacer' }),
+        h('div', { class: 'bar mini', title: `${done}/${own.length} stories done` }, fill(own.length ? done / own.length : 0)),
+        h('span', { class: 'muted count' }, `${done}/${own.length}`)),
+      state === 'building' && cur && !cur.blocked && activity(sessionState(curSid),
+        `${cur.status === 'review' ? 'Reviewing' : 'Building'} “${cur.title}”${cur.attempts ? ` · attempt ${cur.attempts + 1}` : ''}`, attachBtn(e, curSid, 'Attach')),
+      state === 'reviewing' && reviewPanel(e, sp),
+      state === 'fixing' && activity(sessionState(sp.sessionId), 'Fixing sprint review issues', attachBtn(e, sp.sessionId, 'Attach')),
+      state === 'fixing' && sp.issues?.length > 0 && h('ul', { class: 'issues' }, sp.issues.map(i => h('li', {}, i))),
+      sp.blocked && h('div', { class: 'alert' }, h('span', {}, sp.blocked), h('span', { class: 'spacer' }),
         h('button', { class: 'primary', onclick: () => gate(e.id, 'retrySprint', undefined, { sprintId: sp.id }) }, 'Retry')),
-      cur?.blocked && h('div', { class: 'row' },
-        h('span', { class: 'error' }, `${cur.title}: ${cur.blocked}`),
+      cur?.blocked && h('div', { class: 'alert' },
+        h('span', {}, `“${cur.title}”: ${cur.blocked}`),
         cur.reviewNotes && h('span', { class: 'muted', title: cur.reviewNotes }, 'ⓘ last review'),
         h('span', { class: 'spacer' }),
         attachBtn(e, cur.builderSessionId, 'Take over'),
         h('button', { onclick: () => gate(e.id, 'skipStory', undefined, { storyId: cur.id }) }, 'Skip'),
         h('button', { class: 'primary', onclick: () => gate(e.id, 'retryStory', undefined, { storyId: cur.id }) }, 'Retry')),
-      sp.state === 'awaitingMerge' && [
+      state === 'awaitingMerge' && h('div', { class: 'gate' },
+        h('p', { class: 'prompt' }, 'This merge needs your approval:'),
         h('ul', { class: 'reasons' }, (sp.critical ?? []).map(r => h('li', {}, r))),
-        h('div', { class: 'row gate' }, note,
-          h('button', { onclick: () => note.value.trim() ? (delete drafts[sp.id], gate(e.id, 'sendBack', note.value, { sprintId: sp.id })) : note.focus() }, 'Send back'),
-          h('button', { class: 'primary', onclick: () => gate(e.id, 'approveMerge', undefined, { sprintId: sp.id }) }, 'Approve merge'))]);
+        h('div', { class: 'row' }, note,
+          h('div', { class: 'stack' },
+            h('button', { class: 'primary', onclick: () => gate(e.id, 'approveMerge', undefined, { sprintId: sp.id }) }, 'Approve merge'),
+            h('button', { onclick: () => note.value.trim() ? (delete drafts[sp.id], gate(e.id, 'sendBack', note.value, { sprintId: sp.id })) : note.focus() }, 'Send back')))));
   }));
 }
 
+const PR_VIA = [['auto', 'Auto (GitHub → gh, else Gitea)'], ['gh', 'GitHub (gh)'], ['tea', 'Gitea (tea login)'], ['skill', 'Claude skill…']];
 function prGate(e) {
+  const p = data.board.projects.find(x => x.id === e.projectId), pend = e.pending ?? {};
+  const busy = pend.busy && Date.now() - pend.busy < 120000; // older: the window reloaded mid-way
+  const box = (...kids) => h('div', { class: 'gate' }, h('p', { class: 'prompt' }, 'All sprints are merged into ', h('code', {}, e.branch), '.'), kids);
+  if (pend.skill) {
+    const url = h('input', { placeholder: 'https://…/pulls/123', 'aria-label': 'PR URL', 'data-key': 'prurl-' + e.id });
+    return box(h('p', {}, `/${pend.skill} is running in a terminal. Once it has opened the PR, paste its URL to finish the epic.`),
+      h('div', { class: 'row' }, url,
+        h('button', { class: 'primary', onclick: () => /^https?:\/\/\S+$/.test(url.value.trim()) ? gate(e.id, 'prOpened', undefined, { url: url.value.trim() }) : url.focus() }, 'PR opened'),
+        h('button', { class: 'quiet', onclick: () => gate(e.id, 'createPr', undefined, { targetBranch: e.targetBranch, via: 'skill', skill: pend.skill }) }, 'Run again')));
+  }
   const target = h('input', { value: e.targetBranch ?? data.factory.targetBranch, 'aria-label': 'PR target branch', 'data-key': 'pr-' + e.id });
-  return h('div', { class: 'row gate' }, h('span', {}, `All sprints merged into ${e.branch}. Open a PR into`), target,
-    h('button', { class: 'primary', onclick: () => gate(e.id, 'createPr', undefined, { targetBranch: target.value }) }, 'Create PR'));
+  const skills = data.factory.skills?.[e.projectId] ?? [];
+  const skill = h('select', { 'aria-label': 'PR skill', 'data-key': 'prskill-' + e.id },
+    skills.length ? skills.map(n => h('option', { value: n, selected: n === p?.pr?.skill }, '/' + n)) : h('option', { value: '' }, 'No skills found'));
+  const hint = h('p', { class: 'muted' }, 'Runs the skill in a terminal at the project root with the target and the epic branch, e.g. ',
+    h('code', {}, `/${p?.pr?.skill ?? skills[0] ?? 'git-release'} ${e.targetBranch ?? data.factory.targetBranch} ${e.branch}`), '.');
+  const via = h('select', { 'aria-label': 'Create the PR with', 'data-key': 'prvia-' + e.id, onchange: () => { skill.hidden = hint.hidden = via.value !== 'skill'; } },
+    PR_VIA.map(([v, label]) => h('option', { value: v, selected: v === (p?.pr?.via ?? 'auto') }, label)));
+  skill.hidden = hint.hidden = via.value !== 'skill';
+  return box(
+    h('div', { class: 'row' }, h('label', { class: 'inline' }, 'Open a PR into', target), h('label', { class: 'inline' }, 'with', via), skill,
+      h('button', { class: 'primary', disabled: busy || undefined, 'aria-busy': busy ? 'true' : undefined,
+        onclick: () => gate(e.id, 'createPr', undefined, { targetBranch: target.value, via: via.value, skill: skill.value }) }, busy ? 'Creating…' : 'Create PR')),
+    hint,
+    pend.reason && !busy && h('div', { class: 'alert' }, h('span', {}, pend.reason)));
 }
 
 const epicDialog = document.getElementById('epic');
@@ -284,11 +392,16 @@ function openEpicForm(project) {
       effort: h('select', { 'aria-label': `${MODEL_ROLES[r]} effort` }, h('option', { value: '' }, `Default (${d.effort ?? 'Claude default'})`), f.efforts.map(x => h('option', { value: x }, x))),
     }];
   }));
+  // Sprint review panel: any number of reviewers ('' = LexCode reviewer); the first checked one also reviews each story.
+  const reviewers = [{ name: '', label: 'LexCode reviewer', description: 'Bundled general reviewer' },
+    ...ra.agents.map(a => ({ name: a.name, label: `${a.name} (${a.scope})`, description: a.description }))]
+    .map(a => h('input', { type: 'checkbox', value: a.name, checked: (ra.roles.reviewer ?? '') === a.name, 'data-label': a.label, title: a.description }));
   const err = h('p', { class: 'error' });
   const submit = start => {
     if (!title.value.trim()) { err.textContent = 'Title is required.'; return title.focus(); }
     vscode.postMessage({ type: 'addEpic', id: project.id, start, title: title.value, description: desc.value, targetBranch: target.value, builderMode: mode.value,
       roleAgents: Object.fromEntries(Object.entries(roles).map(([r, el]) => [r, el.value])),
+      reviewers: reviewers.filter(c => c.checked).map(c => c.value),
       models: Object.fromEntries(Object.entries(models).map(([r, m]) => [r, { model: m.model.value, effort: m.effort.value }])) });
     epicDialog.close();
   };
@@ -300,10 +413,16 @@ function openEpicForm(project) {
           h('div', { class: 'grid' }, Object.entries(models).map(([r, m]) => [h('span', {}, MODEL_ROLES[r]), m.model, m.effort])))),
       h('aside', {},
         field('Builder mode', mode),
-        field('PR target branch', target),
-        h('h4', {}, 'Agents'),
+        field('Target branch', target),
+        h('p', { class: 'muted hint' }, 'The epic branch is cut from it now, and the PR goes back into it.'),
         ra.error ? h('p', { class: 'error' }, ra.error) : !ra.agents.length && h('p', { class: 'muted' }, 'No .claude/agents found: LexCode defaults are used.'),
-        Object.entries(roles).map(([r, el]) => field(ROLE_LABELS[r], el)),
+        h('h4', {}, 'Planning'),
+        ['orchestrator', 'revalidator', 'security'].map(r => field(ROLE_LABELS[r], roles[r])),
+        h('h4', {}, 'Build'),
+        field(ROLE_LABELS.builder, roles.builder),
+        h('h4', {}, 'Review'),
+        h('p', { class: 'muted hint' }, 'Each sprint is reviewed by the Revalidator and Security agents above, plus every reviewer checked here. The first checked reviewer also checks each story.'),
+        h('div', { class: 'checks' }, reviewers.map(c => h('label', { class: 'check', title: c.title }, c, c.dataset.label))),
         err,
         h('button', { class: 'primary', onclick: () => submit(true) }, 'Create & plan'),
         h('button', { onclick: () => submit(false) }, 'Create without factory')))));
@@ -350,7 +469,9 @@ function renderStory() {
 
   const { epics, sprints } = data.board;
   const projSessions = data.sessions[s.projectId] ?? [];
-  const linked = (s.sessionIds ?? []).map(id => projSessions.find(x => x.id === id) ?? { id, title: '(session file missing)', mtime: 0 });
+  // Factory sessions run in sprint worktrees (not in the project's session list) and belong to the runner: attach only.
+  const linked = storySessions(s).map(({ id, role }) => role ? { id, role, title: `${role} session` }
+    : projSessions.find(x => x.id === id) ?? { id, title: '(session file missing)', mtime: 0 });
   const select = (key, opts, value, onchange) => h('select', { 'data-key': key, onchange },
     opts.map(([v, label]) => h('option', { value: v, selected: v === (value ?? '') }, label)));
 
@@ -395,15 +516,17 @@ function renderStory() {
       linked.length ? linked.map(x => {
         const agent = data.agents[x.id];
         return h('div', { class: 'session' },
-          h('div', { class: 'row' },
-            h('button', { class: 'link', title: `Resume ${x.id}`, onclick: () => send('resume', { sessionId: x.id }) },
-              h('span', {}, x.title), x.mtime ? h('small', {}, ago(x.mtime).replace('Claude ', '')) : null),
-            h('button', { class: 'x', title: 'Unlink session', 'aria-label': `Unlink ${x.title}`, onclick: () => send('unlink', { sessionId: x.id }) }, '×')),
+          x.role
+            ? h('div', { class: 'row' }, h('span', { class: 'link', title: x.id }, h('span', {}, x.title), h('small', {}, 'software factory')))
+            : h('div', { class: 'row' },
+              h('button', { class: 'link', title: `Resume ${x.id}`, onclick: () => send('resume', { sessionId: x.id }) },
+                h('span', {}, x.title), x.mtime ? h('small', {}, ago(x.mtime).replace('Claude ', '')) : null),
+              h('button', { class: 'x', title: 'Unlink session', 'aria-label': `Unlink ${x.title}`, onclick: () => send('unlink', { sessionId: x.id }) }, '×')),
           h('div', { class: 'row actions' },
             agent && h('span', { class: 'state ' + agent.state }, agent.state === 'blocked' ? '⚠ needs approval' : agent.state),
             agent && h('button', { class: agent.state === 'blocked' ? 'primary' : '', title: 'Open in terminal to watch or approve',
               onclick: () => send('attach', { sessionId: x.id }) }, agent.state === 'blocked' ? 'Approve…' : 'Attach'),
-            h('button', { title: 'Continue this session in the background', disabled: data.starting.includes(s.id),
+            !x.role && h('button', { title: 'Continue this session in the background', disabled: data.starting.includes(s.id),
               onclick: () => send('bgRun', { sessionId: x.id, mode: mode.value }) }, '⏵ bg')));
       }) : h('p', { class: 'muted' }, 'No sessions yet.'),
       h('button', { class: 'primary', onclick: () => send('newSession') }, '▶ New Claude session'),

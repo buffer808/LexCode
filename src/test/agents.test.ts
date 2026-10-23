@@ -3,7 +3,7 @@ import * as assert from 'node:assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { discoverAgents, frontmatter, mapRoles, resolveRoles, bundledRolePrompt, ROLES } from '../agents';
+import { discoverAgents, discoverSkills, frontmatter, mapRoles, resolveRoles, bundledRolePrompt, ROLES } from '../agents';
 
 const agentFile = (dir: string, file: string, fm: string) => {
   fs.mkdirSync(dir, { recursive: true });
@@ -52,4 +52,16 @@ test('one agent claims one role; no agents → nothing mapped', () => {
 test('bundled role prompts exist for every role', () => {
   const dir = path.join(__dirname, '..', '..', 'agents');
   for (const r of ROLES) assert.ok(bundledRolePrompt(dir, r).length > 100 && !bundledRolePrompt(dir, r).startsWith('---'), r);
+});
+
+test('discoverSkills: project + user skills and commands, deduped', () => {
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'lex-sk-')), home = fs.mkdtempSync(path.join(os.tmpdir(), 'lex-home-'));
+  const put = (f: string) => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, '---\nname: x\n---\n'); };
+  put(path.join(proj, '.claude/skills/git-release/SKILL.md'));
+  fs.mkdirSync(path.join(proj, '.claude/skills/empty'), { recursive: true }); // no SKILL.md: not a skill
+  put(path.join(proj, '.claude/commands/release.md'));
+  put(path.join(home, '.claude/skills/git-release/SKILL.md'));
+  put(path.join(home, '.claude/commands/ship.md'));
+  assert.deepEqual(discoverSkills(proj, home), ['git-release', 'release', 'ship']);
+  assert.deepEqual(discoverSkills(path.join(proj, 'nope'), path.join(home, 'nope')), []);
 });
