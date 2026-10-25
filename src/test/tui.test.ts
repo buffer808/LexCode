@@ -6,7 +6,8 @@ import * as path from 'path';
 import { execFileSync } from 'child_process';
 
 process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'lexcode-tui-'));
-const { fit, nvimExpr } = require('../tui') as typeof import('../tui');
+const { fit } = require('../tui') as typeof import('../tui');
+const { nvimExpr } = require('../panes') as typeof import('../panes');
 const { launcher } = require('../server') as typeof import('../server');
 
 const HOSTILE = `$(touch pwned)"; ]==] ' \`id\` \n#{pane_id} \\x`;
@@ -16,6 +17,22 @@ test('fit pads, cuts with an ellipsis, and blanks control characters', () => {
   assert.strictEqual(fit('abcdef', 4), 'abc…');
   assert.strictEqual(fit('a\nb', 3), 'a b');
   assert.strictEqual(fit('x', 0), '');
+});
+
+test('fit counts wide characters as two columns', () => {
+  assert.strictEqual(fit('日本', 6), '日本  ');
+  assert.strictEqual(fit('日本語テスト', 6), '日本… '); // 語 would land on the … column: padded instead
+  assert.strictEqual(fit('🚀 go', 6), '🚀 go ');
+});
+
+test('releaseLocks deletes only the locks this owner holds', () => {
+  const { tryLock, releaseLocks } = require('../factory') as typeof import('../factory');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lexcode-locks-'));
+  assert.ok(tryLock(path.join(dir, 'a.lock'), 'me'));
+  assert.ok(tryLock(path.join(dir, 'b.lock'), 'other'));
+  releaseLocks(dir, 'me');
+  assert.deepStrictEqual(fs.readdirSync(dir), ['b.lock']);
+  assert.ok(tryLock(path.join(dir, 'a.lock'), 'next'), 'freed lock is taken at once');
 });
 
 test('launcher script passes story text through as one literal argument (tmux and nvim both run it)', () => {
@@ -32,4 +49,18 @@ test('nvim --remote-expr carries only hex digits from outside', () => {
   const args = e.slice(e.lastIndexOf("', [") + 4, -2);
   assert.match(args, /^'[0-9a-f]+'(, '[0-9a-f]*')*$/);
   assert.ok(!e.includes(HOSTILE));
+});
+
+test('ideArgs adds --ide only when exactly one live IDE covers the folder and it is Neovim', () => {
+  const { ideArgs } = require('../panes') as typeof import('../panes');
+  const nv = { ideName: 'Neovim', workspaceFolders: ['/w/app'] }, devin = { ideName: 'Devin', workspaceFolders: ['/w'] };
+  const argv = ['/bin/claude', '--resume', 's1'];
+  assert.deepStrictEqual(ideArgs(argv, '/bin/claude', [nv], '/w/app/src').argv, ['/bin/claude', '--ide', '--resume', 's1']);
+  assert.deepStrictEqual(ideArgs(argv, '/bin/claude', [nv, devin], '/w/app').argv, argv, 'two candidates: Claude could pick Devin');
+  assert.deepStrictEqual(ideArgs(argv, '/bin/claude', [devin], '/w/app').argv, argv);
+  assert.deepStrictEqual(ideArgs(['/bin/claude', 'attach', 'x'], '/bin/claude', [nv], '/w/app').argv, ['/bin/claude', 'attach', 'x']);
+  assert.deepStrictEqual(ideArgs(['zsh'], '/bin/claude', [nv], '/w/app').argv, ['zsh']);
+  const other = ideArgs(argv, '/bin/claude', [nv], '/w/application');
+  assert.deepStrictEqual(other.argv, argv);
+  assert.match(other.hint ?? '', /:cd \/w\/application/);
 });

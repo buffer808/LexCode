@@ -164,10 +164,7 @@ export function activate(context: vscode.ExtensionContext) {
     const dir = path.resolve(q.path ?? ''), title = q.title?.trim();
     if (!title) return vscode.window.showErrorMessage('LexCode: factory link has no epic title');
     store.reload();
-    // Deepest tracked project containing dir, so a subfolder works too.
-    const p = store.all().projects
-      .filter(p => dir === p.path || dir.startsWith(p.path + path.sep))
-      .sort((a, b) => b.path.length - a.path.length)[0];
+    const p = store.projectFor(dir);
     if (!p) return vscode.window.showErrorMessage(`LexCode: ${dir} is not a LexCode project. Add it from the Board (+) first.`);
     // Opened from outside the editor: show the dashboard so the new epic's progress is visible.
     if (await factoryEpic(p, title, undefined, q.description)) showDashboard(context, store, tree, agents, factory);

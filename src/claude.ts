@@ -6,7 +6,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { randomUUID } from 'crypto';
 import { Project, Story, Store } from './store';
-import { listSessions, sessionExists } from './sessions';
+import { listSessions, sessionExists, turnEnded } from './sessions';
 import { host } from './host';
 
 const terminal = (project: Project, args: string[]) => host().terminal(`Claude · ${project.name}`, project.path, [claudeBin(), ...args]);
@@ -80,7 +80,7 @@ export const PERMISSION_MODES: Record<string, string> = {
 };
 
 // GUI-launched IDEs often lack the shell PATH, so look in the usual install spots too.
-function claudeBin(): string {
+export function claudeBin(): string {
   const set = host().setting('claudePath', '');
   if (set) return set;
   const dirs = [...(process.env.PATH ?? '').split(path.delimiter), path.join(os.homedir(), '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin'];
@@ -132,7 +132,10 @@ export async function backgroundAgents(): Promise<Record<string, Agent>> {
   const list: any[] = JSON.parse(stdout);
   const out: Record<string, Agent> = {};
   for (const a of list.filter(a => a.kind === 'background').sort((x, y) => (x.startedAt ?? 0) - (y.startedAt ?? 0))) {
-    out[a.sessionId] = { id: a.id, sessionId: a.sessionId, state: a.state ?? a.status ?? 'unknown', name: a.name, startedAt: a.startedAt };
+    let state = a.state ?? a.status ?? 'unknown';
+    // Newer CLIs keep a finished --bg session alive and list it as blocked; its transcript says whether the turn ended.
+    if (state === 'blocked' && a.cwd && turnEnded(a.cwd, a.sessionId)) state = 'done';
+    out[a.sessionId] = { id: a.id, sessionId: a.sessionId, state, name: a.name, startedAt: a.startedAt };
   }
   return out;
 }

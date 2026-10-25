@@ -10,7 +10,7 @@ import * as git from './git';
 import {
   Action, EpicInput, NEXT_STAGE, PLANNING, STAGE_LABEL, STAGE_ROLE, applyPlan, builderPrompt, conflictIssue, criticalReasons,
   epicBranch, epicRefs, finished, fixPrompt, mergeVerdicts, nextActions, parseStageOutput, parseVerdict, planFile, readPlan, reviewLabel, reviewPanel, reviewPrompt, sessionArgs,
-  refArgs, sprintBranch, sprintFixPrompt, sprintReviewPrompt, stageArgs, stagePrompt, storiesOf, tryLock, worktreeDir, writePlan,
+  refArgs, sprintBranch, sprintFixPrompt, sprintReviewPrompt, stageArgs, stagePrompt, storiesOf, releaseLocks, tryLock, releaseLock, worktreeDir, writePlan,
 } from './factory';
 
 export type Decision =
@@ -29,11 +29,16 @@ export class FactoryRunner {
   private owner = `${process.pid}-${randomUUID()}`; // this window, for the per-epic driver lock
   private launching = new Set<string>();             // epic/sprint/story ids with work in flight
   private ticking = false;
-  private timer = setInterval(() => this.tick(), 15000); // also the lock heartbeat
-  private sub: { dispose(): void };
+  private timer?: ReturnType<typeof setInterval>; // also the lock heartbeat
+  private held = new Set<string>();                  // epic ids whose driver lock this runner holds
+  private sub?: { dispose(): void };
 
+  // drive: false for one-shot commands (`lexcode epic new`): create() only, never advance or lock other epics.
   constructor(private store: Store, private agents: AgentWatcher, private lockDir: string, private bundled: string,
-              private refresh: () => void) {
+              private refresh: () => void, { drive = true } = {}) {
+    if (!drive) return;
+    // Heartbeat outside tick(): a tick can sit in slow awaits (launches, merges) past the lock's staleness.
+    this.timer = setInterval(() => { this.heartbeat(); this.tick(); }, 15000);
     this.sub = agents.onDidChange(() => this.tick());
     this.tick();
   }
@@ -42,7 +47,25 @@ export class FactoryRunner {
   private models = () => this.setting<Partial<Record<ModelRole, ModelChoice>>>('models', {});
   private project = (e: Epic) => this.store.all().projects.find(p => p.id === e.projectId);
   private epic = (id: string) => { this.store.reload(); return this.store.all().epics.find(e => e.id === id); };
-  private lock = (e: Epic) => tryLock(path.join(this.lockDir, `${e.id}.lock`), this.owner);
+  private lockFile = (id: string) => path.join(this.lockDir, `${id}.lock`);
+  private lock = (e: Epic) => {
+    const ok = tryLock(this.lockFile(e.id), this.owner);
+    if (ok) this.held.add(e.id); else this.held.delete(e.id);
+    return ok;
+  };
+
+  // Keeps held locks fresh while this runner drives the epic; at a gate, error or end it lets go so the other
+  // window (VS Code, TUI, `lexcode ui`) can act on the human's click right away.
+  private heartbeat() {
+    this.store.reload();
+    for (const id of this.held) {
+      const e = this.store.all().epics.find(x => x.id === id);
+      const driving = e && !this.launching.has(id) ? (PLANNING.includes(e.stage!) && !e.error) || e.stage === 'building' : !!e;
+      if (driving && tryLock(this.lockFile(id), this.owner)) continue;
+      if (!driving) releaseLock(this.lockFile(id), this.owner);
+      this.held.delete(id);
+    }
+  }
 
   // New factory epic (or an existing manual one, by id): freezes role → agent mapping, cuts the epic branch from the
   // PR target into its own worktree, then plans there, so plan, build and PR all start from the target branch.
@@ -115,7 +138,10 @@ export class FactoryRunner {
       let acted = false;
       for (const epic of this.store.all().epics) {
         if (epic.stage === 'building' && this.lock(epic)) {
-          for (const a of nextActions(this.store.all(), epic, this.agents.agents, this.launching)) { await this.run(epic, a); acted = true; }
+          for (const a of nextActions(this.store.all(), epic, this.agents.agents, this.launching)) {
+            if (!this.lock(epic)) break; // lost it during an earlier slow action: the new driver takes over
+            await this.run(epic, a); acted = true;
+          }
           continue;
         }
         if (!PLANNING.includes(epic.stage!) || !epic.stageSessionId || epic.error || this.launching.has(epic.id)) continue;
@@ -145,7 +171,7 @@ export class FactoryRunner {
       this.launching.add(epic.id);
       try {
         const agent = discoverAgents(project.path).find(a => a.name === epic.roleAgents?.[STAGE_ROLE[stage]!]);
-        const fix = `Your last reply could not be used: ${e.message}. Reply again with the complete plan as exactly one \`\`\`json block in the required shape.`;
+        const fix = `Your last reply could not be used: ${e.message}. Reply again with the complete plan as exactly one \`\`\`json block in the required shape, in your reply text (not in a file).`;
         this.store.update('epics', epic.id, { stageAttempts: 1, stageStartedAt: Date.now() });
         const sid = await launchBackground(project, [...refArgs(epic, this.attachDir(epic)), ...stageArgs(stage, epic, fix, this.models(), agent, epic.stageSessionId, this.stageExtra(project, cwd))], cwd);
         this.store.update('epics', epic.id, sid ? { stageSessionId: sid } : { error: `Claude doesn't trust ${cwd}` });
@@ -174,7 +200,7 @@ export class FactoryRunner {
     if (c === 'View plan') this.openPlan(epic.id);
     else if (c === 'Approve') await this.decide(epic.id, { decision: 'approve' });
     else if (c === 'Request changes') {
-      const text = await host().input(`What should change in the plan for "${epic.title}"?`);
+      const text = await host().input(`What should change in the plan for "${epic.title}"?`, undefined, { multiline: true });
       if (text) await this.decide(epic.id, { decision: 'changes', text });
     } else if (c === 'Reject') await this.decide(epic.id, { decision: 'reject' });
   }
@@ -517,7 +543,7 @@ export class FactoryRunner {
     host().message('info', `PR opened for "${epic.title}"`, undefined, 'Open PR').then(c => c && host().openExternal(url));
   }
 
-  dispose() { clearInterval(this.timer); this.sub.dispose(); }
+  dispose() { clearInterval(this.timer); this.sub?.dispose(); releaseLocks(this.lockDir, this.owner); }
 }
 
 const dashboardAction = () => host().showDashboard ? ['Open dashboard'] : [];

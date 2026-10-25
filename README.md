@@ -76,8 +76,19 @@ lexcode          # same as `lexcode tui`
   - Force one with `"lexCode.tui.terminal": "tmux" | "nvim" | "inline"` in `~/.lexcode/settings.json`.
 - **One Claude pane at a time.** Attaching another card parks the current pane, which keeps running: a hidden `⏸ <card>` window in tmux, a hidden buffer in Neovim. Attaching a parked card swaps its pane back in, so no second Claude starts on the same session. Cards show `▣ open`, `⏸ parked`, `◉ running`, `! approve`, or `↻` (has sessions). When Claude exits, its pane closes.
 - **Keys:** arrows or `hjkl` move, `⏎`/`a` attach, `c` new session, `H`/`L` move status, `n` new story, `d` delete, `[`/`]` switch project, `o` shell in the project, `A` add project, `i` import tasks, `tab` jump to the Claude pane, `?` all keys, `q` quit. Get back from Claude with your tmux prefix plus an arrow key, or `<C-\><C-n><C-w>h` in Neovim.
+- **Neovim:**
+  - `:LexCode` opens the board in a tab, or jumps back to it. Add the plugin with lazy.nvim `{ dir = '<LexCode repo>/nvim' }`, or put that folder on `runtimepath`. It runs `lexcode tui`, or the extension's bundled CLI when `lexcode` isn't installed.
+  - With [claudecode.nvim](https://github.com/coder/claudecode.nvim) running, Claude starts with `--ide`, so its edits open as Neovim diffs (`:ClaudeCodeDiffAccept` / `:ClaudeCodeDiffDeny`). This only happens when that Neovim is the one editor open on the project folder; with VS Code or Devin open on it too, Claude starts without `--ide` so it can't connect to the wrong one. If Neovim is on another folder, the board tells you to `:cd` there.
 - Below 100 columns (for example next to a Claude pane) the board becomes one list grouped by status.
-- Shares `board.json`, settings, and factory locks with VS Code and `lexcode ui`. The factory advances while any of them runs. Factory gates (approve plan, merge, PR) aren't in the TUI yet: use the dashboard.
+- **Factory epics:** `e` switches between the board and the project's epics. The screen shows each epic's stage, then the selected epic's pipeline and sprints, with reviewers and blockers under them. `h`/`l` pick an epic and `j`/`k` move over its sprints. The footer lists only the keys valid right now, the same actions as the dashboard's buttons:
+  - plan: `v` read it, `V` source, `y` approve, `C` request changes, `X` reject;
+  - build: `s` start, `p` pause or resume, `w` builders, `x` cancel;
+  - sprint: `a` attach the running builder, reviewer or fix session (`⏎` too), `m` approve merge, `b` send back, `R` retry, `S` skip a blocked story;
+  - PR: `P` create (gh, tea, or a Claude skill), `u` paste the URL a skill opened, `o` open the PR.
+- **`N` new factory epic** asks the dashboard form's questions on the bottom lines: title, how builders run, description, target branch, models, reference files (comma-separated paths, at most 20 files of 25 MB). Nothing is created until you confirm; `esc` cancels.
+- **`g`** jumps to the next thing waiting on you, in any project: a plan or PR gate, a merge to approve, a blocked sprint or story, or a session asking for permission.
+- **Long text** (epic description, plan changes, send-back notes) opens in `$VISUAL`/`$EDITOR` over the board: a tmux popup (tmux 3.2+), a floating window inside Neovim, or the whole terminal otherwise. Text below the `>8` line is help and is dropped; leave it empty to cancel. `v` shows the plan with `glow` if installed, else `less`.
+- Shares `board.json`, settings, and factory locks with VS Code and `lexcode ui`. The factory advances while any of them runs; quitting one hands its epics to the others at once.
 - Logs go to `~/.lexcode/tui.log`.
 
 ## Usage
@@ -183,7 +194,15 @@ Use **⏸ Pause** to stop new sessions from starting; running ones finish. Backg
   - the agent for each planning and build role, and one or more reviewers for the review panel;
   - optionally, the model and effort for each role.
 - **Existing epics:** run **Run Software Factory on Epic** from an epic's context menu.
-- **From Claude Code:** `/lexcode-factory <epic title and description>` opens the same prompts with the description filled in. Install the skill once:
+- **From the command line:** `lexcode epic new` creates the epic and starts planning, then exits. Planning carries on as a Claude background session; the epic reaches the plan gate while VS Code, `lexcode ui` or `lexcode` is running.
+
+  ```sh
+  lexcode epic new --title "Add CSV export" --description-file spec.md --target-branch main
+  lexcode epic new --from - --json < epic.json   # same fields as the dashboard form, as one JSON object
+  ```
+
+  Other options: `--mode accept-edits|auto` (default accept edits), `--planner-model`/`--planner-effort` and the same for `builder` and `reviewer`, `--attach <file>` (repeatable). It works from any folder inside a tracked project.
+- **From Claude Code:** `/lexcode-factory <epic title and description>`. Inside an editor with LexCode it opens the same prompts there, with the description filled in. Anywhere else it asks for the builder mode and target branch in chat and runs `lexcode epic new`. Install the skill once:
 
   ```sh
   mkdir -p ~/.claude/skills/lexcode-factory && cp skills/lexcode-factory/SKILL.md ~/.claude/skills/lexcode-factory/

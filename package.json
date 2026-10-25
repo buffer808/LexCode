@@ -2,7 +2,7 @@
   "name": "lex-code",
   "displayName": "LexCode",
   "description": "Agile project manager for concurrent projects with Claude Code sessions",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "publisher": "lex",
   "icon": "media/icon.png",
   "repository": {

@@ -128,6 +128,13 @@ export class Store {
 
   all(): Board { return this.board; }
 
+  // Deepest tracked project containing dir, so a subfolder works too.
+  projectFor(dir: string): Project | undefined {
+    const d = path.resolve(dir);
+    return this.board.projects.filter(p => d === p.path || d.startsWith(p.path + path.sep))
+      .sort((a, b) => b.path.length - a.path.length)[0];
+  }
+
   add<C extends Collection>(c: C, item: Omit<Board[C][number], 'id'>): Board[C][number] {
     return this.mutate(b => {
       const created = { ...item, id: randomUUID() } as Board[C][number];

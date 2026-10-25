@@ -42,6 +42,12 @@ const PLAN_SCHEMA = `{
   "security": [{ "severity": "low|medium|high", "sprint": "S1", "story": "story title", "finding": "risk and how to prevent it" }]
 }`;
 
+// Read-only (plan-mode) sessions hand back their result as reply text. Plan mode tells Claude to write a plan file and
+// exit plan mode; with those tools gone it can only answer in the reply, which is what the factory reads.
+const PLAN_MODE_DENY = ['ExitPlanMode', 'Write', 'Edit', 'NotebookEdit'];
+const READ_ONLY_OUTPUT = 'You are running unattended in read-only plan mode: do not ask questions, do not try to exit plan mode, and do not write a plan file or any other file. ' +
+  'The factory reads only your final reply text.';
+
 export interface StageContext {
   refs?: string[];           // absolute paths of the epic's reference files (epicRefs)
   plan?: Plan;               // current plan (revalidate/security, or planning after "request changes")
@@ -70,7 +76,7 @@ export function stagePrompt(stage: EpicStage, epic: Epic, ctx: StageContext): st
     ctx.plan && `## Current plan\n\`\`\`json\n${JSON.stringify(ctx.plan, null, 2)}\n\`\`\``,
     ctx.feedback && `## Human feedback\n${ctx.feedback}`,
     others.length && `## Available project subagents\nDelegate to these where their expertise fits:\n${others.map(a => `- ${a.name}: ${a.description || '(no description)'}`).join('\n')}`,
-    `## Output\nYou are running unattended in read-only plan mode: do not ask questions and do not try to exit plan mode. ` +
+    `## Output\n${READ_ONLY_OUTPUT} ` +
     `Make reasonable assumptions and state them in \`summary\`. End your final message with exactly one \`\`\`json block in this shape:\n\`\`\`json\n${PLAN_SCHEMA}\n\`\`\``,
   ].filter(Boolean).join('\n\n');
 }
@@ -79,7 +85,7 @@ export function stagePrompt(stage: EpicStage, epic: Epic, ctx: StageContext): st
 export function stageArgs(stage: EpicStage, epic: Epic, prompt: string, settings: Partial<Record<ModelRole, ModelChoice>>, agent?: AgentDef, resumeId?: string, extra: string[] = []): string[] {
   const role = STAGE_ROLE[stage]!;
   // --disallowedTools is variadic: keep an option right after it so it can't swallow the prompt.
-  return ['--disallowedTools', 'ExitPlanMode', '--permission-mode', 'plan',
+  return ['--disallowedTools', ...PLAN_MODE_DENY, '--permission-mode', 'plan',
     ...(agent ? ['--agent', agent.name] : []), ...modelArgs(epic, role, settings, agent), ...extra,
     ...(resumeId ? ['--resume', resumeId] : ['-n', `LexCode · ${epic.title} · ${STAGE_LABEL[stage]}`]), prompt];
 }
@@ -131,6 +137,17 @@ export function tryLock(file: string, owner: string, staleMs = 60_000, now = Dat
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify({ owner, at: now }));
   return JSON.parse(fs.readFileSync(file, 'utf8')).owner === owner;
+}
+
+export function releaseLock(file: string, owner: string) {
+  try { if (JSON.parse(fs.readFileSync(file, 'utf8')).owner === owner) fs.unlinkSync(file); } catch { /* gone or corrupt */ }
+}
+
+// On shutdown: delete the locks this owner holds so another window takes over now, not after staleMs.
+export function releaseLocks(dir: string, owner: string) {
+  let files: string[] = [];
+  try { files = fs.readdirSync(dir).filter(f => f.endsWith('.lock')); } catch { return; }
+  for (const f of files) releaseLock(path.join(dir, f), owner);
 }
 
 /* ---------- new epic input (dashboard form / command); webview input is untrusted ---------- */
@@ -281,7 +298,7 @@ export const fixPrompt = (s: Story, issues: string[]) =>
   `The reviewer rejected your work on "${s.title}". Fix every issue below, rerun the tests, and commit with the message \`${commitMessage(s)} (fix)\`.\n\n${issues.map(i => `- ${i}`).join('\n')}`;
 
 const VERDICT_SCHEMA = `{ "pass": true, "risk": "minor|critical", "issues": ["specific, actionable problem (file:line, what to change)"] }`;
-const verdictRules = `## Output\nYou are running unattended in read-only plan mode: do not ask questions and do not try to exit plan mode. ` +
+const verdictRules = `## Output\n${READ_ONLY_OUTPUT} ` +
   `End your final message with exactly one \`\`\`json block:\n\`\`\`json\n${VERDICT_SCHEMA}\n\`\`\`\n` +
   `A failing verdict must list issues. Use risk "critical" for security-sensitive code, migrations, public API/config changes, or anything you are unsure is safe to merge.`;
 
@@ -354,7 +371,7 @@ const NO_WORKTREE_TOOLS = ['EnterWorktree', 'ExitWorktree'];
 export interface SessionArgs { mode: string; agent?: AgentDef; extra: string[]; name?: string; resumeId?: string }
 // Args for builder/reviewer sessions (launchBackground adds --bg). Reviewers are read-only.
 export function sessionArgs(e: Epic, role: Role, prompt: string, settings: Partial<Record<ModelRole, ModelChoice>>, a: SessionArgs): string[] {
-  return ['--disallowedTools', ...(a.mode === 'plan' ? ['ExitPlanMode'] : []), ...NO_WORKTREE_TOOLS, '--permission-mode', a.mode,
+  return ['--disallowedTools', ...(a.mode === 'plan' ? PLAN_MODE_DENY : []), ...NO_WORKTREE_TOOLS, '--permission-mode', a.mode,
     ...(a.agent ? ['--agent', a.agent.name] : []), ...modelArgs(e, role, settings, a.agent), ...a.extra,
     ...(a.resumeId ? ['--resume', a.resumeId] : a.name ? ['-n', a.name] : []), prompt];
 }

@@ -2,7 +2,8 @@
 export interface Host {
   // Like vscode.window.show*Message: resolves to the clicked action, undefined when dismissed.
   message(level: 'info' | 'warn' | 'error', text: string, opts?: { modal?: boolean; detail?: string }, ...actions: string[]): Promise<string | undefined>;
-  input(prompt: string, value?: string): Promise<string | undefined>;
+  // multiline: a paragraph is expected; the terminal app opens $EDITOR for it, others ignore the flag.
+  input(prompt: string, value?: string, opts?: { multiline?: boolean }): Promise<string | undefined>;
   // key under lexCode.*, e.g. 'claudePath' or 'factory.models'.
   setting<T>(key: string, fallback: T): T;
   // Interactive program (argv[0] is the binary) in cwd, shown to the user.

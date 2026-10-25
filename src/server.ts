@@ -15,17 +15,11 @@ import { dashboardCore, ProjectActions } from './dashboardCore';
 import { Host, setHost, host } from './host';
 import { findTasksFile, parseTasks, importInto, syncSource } from './importer';
 
-export const HOME = path.join(os.homedir(), '.lexcode');
+import { HOME, setting } from './config';
 const ROOT = path.join(__dirname, '..');
 const MEDIA = path.join(ROOT, 'media');
 const TYPES: Record<string, string> = { '.js': 'text/javascript', '.css': 'text/css', '.html': 'text/html', '.svg': 'image/svg+xml',
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
-
-// Settings use the VS Code names ("lexCode.claudePath", "lexCode.factory.models", ...) so they can be copied over.
-export function setting<T>(key: string, fallback: T): T {
-  try { return JSON.parse(fs.readFileSync(path.join(HOME, 'settings.json'), 'utf8'))[`lexCode.${key}`] ?? fallback; }
-  catch { return fallback; }
-}
 
 // Kept across restarts so an open tab's cookie stays valid.
 function token(): string {

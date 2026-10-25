@@ -47,7 +47,7 @@ test('stage prompt and args', () => {
   assert.match(stagePrompt('planning', e, { plan, feedback: 'smaller stories', collaborators: [] }), /Revise the plan[\s\S]*## Human feedback\nsmaller stories/);
 
   const args = stageArgs('planning', e, 'PROMPT', {}, agent('lead'));
-  assert.deepEqual(args, ['--disallowedTools', 'ExitPlanMode', '--permission-mode', 'plan', '--agent', 'lead',
+  assert.deepEqual(args, ['--disallowedTools', 'ExitPlanMode', 'Write', 'Edit', 'NotebookEdit', '--permission-mode', 'plan', '--agent', 'lead',
     '--model', 'opus', '--effort', 'high', '-n', 'LexCode · Health · Planning', 'PROMPT']);
   const resume = stageArgs('securityCheck', e, 'FIX', {}, undefined, 'sid');
   assert.deepEqual(resume.slice(-3), ['--resume', 'sid', 'FIX']);
@@ -232,7 +232,7 @@ test('builder/reviewer prompts and args', () => {
   assert.deepEqual(sessionArgs(e, 'builder', 'P', {}, { mode: 'auto', agent: agent('dev'), extra: ['--settings', '{}'], name: 'n' }),
     ['--disallowedTools', 'EnterWorktree', 'ExitWorktree', '--permission-mode', 'auto', '--agent', 'dev', '--settings', '{}', '-n', 'n', 'P']);
   assert.deepEqual(sessionArgs(e, 'reviewer', 'P', { reviewer: { model: 'sonnet' } }, { mode: 'plan', extra: [], resumeId: 'sid' }),
-    ['--disallowedTools', 'ExitPlanMode', 'EnterWorktree', 'ExitWorktree', '--permission-mode', 'plan', '--model', 'sonnet', '--resume', 'sid', 'P']);
+    ['--disallowedTools', 'ExitPlanMode', 'Write', 'Edit', 'NotebookEdit', 'EnterWorktree', 'ExitWorktree', '--permission-mode', 'plan', '--model', 'sonnet', '--resume', 'sid', 'P']);
 
   assert.equal(epicBranch(epic({ title: 'Add /health — v2!' })), 'lexcode/add-health-v2-e1');
   assert.equal(sprintBranch(building(), sp('S1', { key: 'S 1' })), 'lexcode/health-e1--s-1');

@@ -57,6 +57,29 @@ export function finalMessage(projectPath: string, sessionId: string, home?: stri
   return last;
 }
 
+// True when the session's latest turn finished (a `turn_duration` entry after the last message), as opposed to
+// waiting mid-turn on a permission prompt. Idle `--bg` sessions stay alive and are listed as `blocked` either way.
+// ponytail: reads only the last 64KB; a single huge final entry could hide the marker (reads as not ended).
+export function turnEnded(projectPath: string, sessionId: string, home?: string): boolean {
+  let tail: string;
+  try {
+    const fd = fs.openSync(path.join(sessionDir(projectPath, home), sessionId + '.jsonl'), 'r');
+    try {
+      const size = fs.fstatSync(fd).size, len = Math.min(size, 65536), buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, size - len);
+      tail = buf.toString('utf8');
+    } finally { fs.closeSync(fd); }
+  } catch { return false; }
+  for (const line of tail.split('\n').reverse()) {
+    let r: any;
+    try { r = JSON.parse(line); } catch { continue; }
+    if (r.isSidechain) continue;
+    if (r.type === 'system' && r.subtype === 'turn_duration') return true;
+    if (r.type === 'assistant' || r.type === 'user') return false;
+  }
+  return false;
+}
+
 export interface FileEdit { file: string; edits: number; last: number; sessionIds: string[] }
 
 const EDIT_TOOLS: Record<string, string> = { Edit: 'file_path', MultiEdit: 'file_path', Write: 'file_path', NotebookEdit: 'notebook_path' };

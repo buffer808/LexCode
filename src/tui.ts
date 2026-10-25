@@ -3,169 +3,62 @@
 // (tmux: hidden windows, Neovim: hidden buffers) and swapped back in, still running, on the next attach.
 // Without tmux or Neovim, Claude takes over the terminal and the board comes back when it exits.
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as readline from 'readline';
 import { createHash } from 'crypto';
-import { execFile, execFileSync, spawn, spawnSync } from 'child_process';
+import { execFile, spawnSync } from 'child_process';
 import { Store, Board, Story, Status, Project } from './store';
-import { Agent, AgentWatcher, liveRun } from './claude';
+import { Agent, AgentWatcher, liveRun, claudeBin } from './claude';
 import { FactoryRunner } from './factoryRunner';
 import { dashboardCore } from './dashboardCore';
 import { Host, setHost } from './host';
 import { syncSource } from './importer';
-import { HOME, setting, launcher, cliProjects, opener, onPath } from './server';
+import { Pane, tmuxPane, nvimPane, inlinePane, ideArgs, ideLocks } from './panes';
+import { Act, SCISSORS, cutHelp, epicNeeds, epicView, pipeline, progress } from './epicView';
+import { validBranch } from './factory';
+import { launcher, cliProjects, opener, onPath } from './server';
+import { HOME, setting } from './config';
 
 const STATUSES: Status[] = ['todo', 'doing', 'review', 'done'];
 const ROOT = path.join(__dirname, '..');
 
+// Terminal columns for one code point: East Asian wide/fullwidth and emoji take 2, combining marks and ZWJ 0.
+// ponytail: range check, not full Unicode width tables; rare scripts may be off by one.
+const cols = (c: string) => {
+  const n = c.codePointAt(0)!;
+  if (/[̀-ͯ​-‏︀-️]/.test(c)) return 0;
+  return (n >= 0x1100 && n <= 0x115f) || (n >= 0x2e80 && n <= 0xa4cf) || (n >= 0xac00 && n <= 0xd7a3) || (n >= 0xf900 && n <= 0xfaff)
+    || (n >= 0xfe30 && n <= 0xfe4f) || (n >= 0xff00 && n <= 0xff60) || (n >= 0xffe0 && n <= 0xffe6)
+    || (n >= 0x1f300 && n <= 0x1faff) || (n >= 0x20000 && n <= 0x3fffd) ? 2 : 1;
+};
 // Padded/cut to exactly w columns; control characters become spaces.
-// ponytail: one column per code point; wide CJK/emoji titles push the row out of line.
 export function fit(s: string, w: number) {
   if (w <= 0) return '';
   const cs = Array.from(s.replace(/[\x00-\x1f\x7f]/g, ' '));
-  return cs.length > w ? cs.slice(0, w - 1).join('') + '…' : cs.join('') + ' '.repeat(w - cs.length);
+  const total = cs.reduce((n, c) => n + cols(c), 0);
+  if (total <= w) return cs.join('') + ' '.repeat(w - total);
+  let r = '', used = 0;
+  for (const c of cs) { if (used + cols(c) > w - 1) break; r += c; used += cols(c); }
+  return r + '…' + ' '.repeat(w - 1 - used); // pad when a wide char didn't fit before the …
 }
 const sgr = (code: string, s: string) => code ? `\x1b[${code}m${s}\x1b[0m` : s;
+// ponytail: split on spaces; quoted arguments inside $EDITOR aren't supported.
+const editor = () => (process.env.VISUAL || process.env.EDITOR || 'vi').trim().split(/\s+/);
 
-/* ---------- the right-hand pane ---------- */
-// key: which card the pane belongs to (story id, or a hash of the command for anything else).
-// make: writes the launcher script; only called when a new pane is actually started.
-interface Pane {
-  show(key: string): boolean;                  // bring an existing pane for key to the right; false = none
-  open(key: string, label: string, make: () => string): void;
-  edit?(file: string, line?: number): void;   // absent: $EDITOR in the pane
-  focus(): void;
-  state(): { open?: string; parked: string[] };
-}
-
-function tmuxPane(self: string): Pane {
-  const tmux = (...a: string[]) => execFileSync('tmux', a, { encoding: 'utf8' }).trim();
-  // tmux would read #[…] / #{…} in titles and window names as formats.
-  const name = (s: string) => s.replace(/[\x00-\x1f#]/g, ' ').slice(0, 40);
-  let cur: { pane: string; key: string; label: string } | undefined;
-  const parked = new Map<string, { pane: string; label: string }>();
-  const prune = () => {
-    const live = new Set(tmux('list-panes', '-a', '-F', '#{pane_id}').split('\n'));
-    if (cur && !live.has(cur.pane)) cur = undefined; // Claude exited: its pane closed
-    for (const [k, p] of parked) if (!live.has(p.pane)) parked.delete(k);
-  };
-  const park = () => {
-    if (!cur) return;
-    tmux('break-pane', '-d', '-s', cur.pane, '-n', `⏸ ${name(cur.label)}`);
-    parked.set(cur.key, cur);
-    cur = undefined;
-  };
-  const show = (key: string) => {
-    prune();
-    if (cur?.key === key) { tmux('select-pane', '-t', cur.pane); return true; }
-    const back = parked.get(key);
-    if (!back) return false;
-    park();
-    parked.delete(key);
-    tmux('join-pane', '-h', '-l', '55%', '-s', back.pane, '-t', self);
-    cur = { ...back, key };
-    return true;
-  };
-  return {
-    show,
-    open(key, label, make) {
-      if (show(key)) return;
-      park();
-      // Two arguments after --: tmux execs them directly, no shell. The prompt stays inside the script file.
-      const pane = tmux('split-window', '-h', '-l', '55%', '-t', self, '-P', '-F', '#{pane_id}', '--', 'sh', make());
-      tmux('select-pane', '-t', pane, '-T', name(label));
-      cur = { pane, key, label };
-    },
-    focus() { prune(); if (cur) tmux('select-pane', '-t', cur.pane); },
-    state() { try { prune(); } catch { /* tmux gone */ } return { open: cur?.key, parked: [...parked.keys()] }; },
-  };
-}
-
-// Lua runs inside the user's Neovim; arguments travel hex-encoded so no string ever needs quoting.
-const NVIM_LUA = `-- Written by \`lexcode tui\`: one Claude window on the right; other cards' terminals stay as hidden buffers.
-local function unhex(s) return (s:gsub('..', function(h) return string.char(tonumber(h, 16)) end)) end
-return function(op, key, script)
-  op, key, script = unhex(op), unhex(key), unhex(script)
-  local L = _G.lexcode_tui or { bufs = {} }
-  _G.lexcode_tui = L
-  local api = vim.api
-  local win_ok = L.win and api.nvim_win_is_valid(L.win)
-  for k, b in pairs(L.bufs) do if not api.nvim_buf_is_valid(b) then L.bufs[k] = nil end end
-  if op == 'edit' then
-    vim.cmd('tabedit ' .. vim.fn.fnameescape(key))
-    local n = tonumber(script)
-    if n then pcall(api.nvim_win_set_cursor, 0, { n, 0 }) end
-    return 1
-  end
-  if op == 'focus' then
-    if win_ok then api.nvim_set_current_win(L.win); vim.cmd('startinsert') end
-    return 1
-  end
-  local shown = win_ok and api.nvim_win_get_buf(L.win) or -1
-  if op == 'state' then
-    local open, parked = '', {}
-    for k, b in pairs(L.bufs) do if b == shown then open = k else parked[#parked + 1] = k end end
-    return open .. '\\n' .. table.concat(parked, '\\n')
-  end
-  local buf = L.bufs[key]
-  if not buf and op == 'show' then return 0 end
-  if not win_ok then
-    vim.cmd('botright vsplit')
-    L.win = api.nvim_get_current_win()
-    api.nvim_win_set_width(L.win, math.floor(vim.o.columns * 0.55))
-  else
-    api.nvim_set_current_win(L.win)
-  end
-  if buf then
-    api.nvim_win_set_buf(L.win, buf)
-  else
-    buf = api.nvim_create_buf(true, false)
-    api.nvim_win_set_buf(L.win, buf)
-    if vim.fn.has('nvim-0.11') == 1 then vim.fn.jobstart({ 'sh', script }, { term = true })
-    else vim.fn.termopen({ 'sh', script }) end
-    L.bufs[key] = buf
-  end
-  vim.cmd('startinsert')
-  return 1
-end
-`;
-const hex = (s: string) => Buffer.from(s).toString('hex');
-const UNHEX = `(_A[1]:gsub("..", function(h) return string.char(tonumber(h, 16)) end))`;
-// The --remote-expr for one call: everything from outside is hex digits inside single-quoted Vim strings.
-export const nvimExpr = (luaFile: string, ...args: [string, string, string]) =>
-  `luaeval('dofile(${UNHEX})(_A[2], _A[3], _A[4])', [${[luaFile, ...args].map(a => `'${hex(a)}'`).join(', ')}])`;
-
-function nvimPane(server: string): Pane {
-  const lua = path.join(HOME, 'tui-nvim.lua');
-  fs.mkdirSync(HOME, { recursive: true });
-  fs.writeFileSync(lua, NVIM_LUA);
-  const call = (op: string, key = '', script = '') =>
-    execFileSync('nvim', ['--server', server, '--remote-expr', nvimExpr(lua, op, key, script)], { encoding: 'utf8' }).trim();
-  let cached: { open?: string; parked: string[] } = { parked: [] };
-  const refresh = () => {
-    try { const [open, ...parked] = call('state').split('\n'); cached = { open: open || undefined, parked: parked.filter(Boolean) }; }
-    catch { /* nvim busy or closing */ }
-  };
-  return {
-    show(key) { const ok = call('show', key) === '1'; refresh(); return ok; },
-    open(key, label, make) { call('open', key, make()); refresh(); },
-    edit(file, line) { call('edit', file, line ? String(line) : ''); },
-    focus() { call('focus'); },
-    state() { refresh(); return cached; },
-  };
-}
-
-// No multiplexer: hand the terminal to Claude until it exits.
-function inlinePane(suspend: () => void, resume: () => void): Pane {
-  return {
-    show: () => false,
-    open(_key, _label, make) {
-      suspend();
-      spawn('sh', [make()], { stdio: 'inherit' }).on('exit', resume).on('error', resume);
-    },
-    focus() {},
-    state: () => ({ parked: [] }),
-  };
+const MIME: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
+  '.svg': 'image/svg+xml', '.pdf': 'application/pdf', '.md': 'text/markdown', '.txt': 'text/plain' };
+// New-epic reference files: comma-separated paths (~ and relative to the project), same limits as dashboard uploads.
+export function readRefs(input: string, base: string): { name: string; mime: string; data: string }[] {
+  const paths = input.split(',').map(s => s.trim()).filter(Boolean);
+  if (paths.length > 20) throw new Error('At most 20 reference files.');
+  return paths.map(p => {
+    const file = path.resolve(base, p.replace(/^~(?=$|\/)/, os.homedir()));
+    const st = fs.statSync(file, { throwIfNoEntry: false });
+    if (!st?.isFile()) throw new Error(`${p} isn't a file.`);
+    if (st.size > 25 * 1024 * 1024) throw new Error(`${p} is over 25 MB.`);
+    return { name: path.basename(file), mime: MIME[path.extname(file).toLowerCase()] ?? 'application/octet-stream', data: fs.readFileSync(file).toString('base64') };
+  });
 }
 
 /* ---------- app ---------- */
@@ -189,37 +82,66 @@ export async function tui(boardFile: string) {
 
   let pane: Pane;
   let intent: { key: string; label: string } | undefined; // the card being attached, read by host.terminal
-  // ponytail: one pending intent; two quick attaches before the first launches can swap keys.
+  // Attaches run one at a time so each launch reads its own intent (keys in one stdin chunk arrive back to back).
+  let launches = Promise.resolve();
+  const launch = (i: { key: string; label: string }, run: () => unknown) => {
+    launches = launches.then(async () => { intent = i; try { await run(); } finally { intent = undefined; } }).catch(e => host.log(e.message));
+  };
   const host: Host = {
     message(level, text, opts, ...actions) {
       if (!actions.length) { flash = { text: opts?.detail ? `${text}: ${opts.detail}` : text, level, at: Date.now() }; render(); return Promise.resolve(undefined); }
       return ask({ kind: 'choice', text, level, detail: opts?.detail, value: '', actions });
     },
-    input: (prompt, value) => ask({ kind: 'input', text: prompt, value: value ?? '', actions: [] }),
+    input: (prompt, value, opts) => opts?.multiline ? editText(value ?? '', prompt) : ask({ kind: 'input', text: prompt, value: value ?? '', actions: [] }),
     setting,
     terminal(title, cwd, argv) {
       const key = intent?.key ?? createHash('sha1').update(JSON.stringify([cwd, argv])).digest('hex').slice(0, 12);
       const label = intent?.label ?? title;
       intent = undefined;
+      // In Neovim with claudecode.nvim: --ide so Claude's edits open as Neovim diffs.
+      if (inNvim) { const r = ideArgs(argv, claudeBin(), ideLocks(), cwd); argv = r.argv; if (r.hint) host.message('info', r.hint); }
       try { pane.open(key, label, () => launcher(label, cwd, argv)); } // its title escape names the tmux pane too
       catch (e: any) { host.message('error', `Couldn't open the Claude pane: ${e.message}`); }
     },
     openFile(file, opts) {
       if (pane.edit) return pane.edit(file, opts?.line);
-      const [ed, ...edArgs] = (process.env.VISUAL || process.env.EDITOR || 'vi').split(/\s+/); // ponytail: no quoted args in $EDITOR
-      host.terminal(`Edit · ${path.basename(file)}`, path.dirname(file), [ed, ...edArgs, ...(opts?.line ? [`+${opts.line}`] : []), file]);
+      if (opts?.preview) { // rendered markdown (plans): a pager over the board
+        const viewer = onPath('glow') ? ['glow', '-p', file] : ['less', '-R', file];
+        return pane.popup(() => launcher(path.basename(file), path.dirname(file), viewer));
+      }
+      host.terminal(`Edit · ${path.basename(file)}`, path.dirname(file), [...editor(), ...(opts?.line ? [`+${opts.line}`] : []), file]);
     },
     openExternal: url => { if (/^https?:\/\//.test(url)) execFile(opener, [url]); },
     log: line => fs.appendFile(logFile, `${new Date().toISOString()} ${line}\n`, () => {}),
   };
   setHost(host);
 
+  // Long text (epic description, plan changes, send-back notes) in $EDITOR over the board; undefined = cancelled.
+  async function editText(initial: string, hint: string): Promise<string | undefined> {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lexcode-text-'));
+    const file = path.join(dir, 'TEXT.md'), done = path.join(dir, 'done');
+    try {
+      fs.writeFileSync(file, `${initial}\n\n${SCISSORS}\n${hint.split('\n').map(l => `# ${l}`).join('\n')}\n# Everything from the >8 line down is ignored. Leave the text empty to cancel.\n`, { mode: 0o600 });
+      // The launcher writes `done` once the editor exits; Neovim's floating window writes it on close.
+      pane.popup(() => launcher('LexCode · edit', dir, ['sh', '-c', '"$@"; : > "$0"', done, ...editor(), file]), { file, done });
+      while (!fs.existsSync(done)) await new Promise(r => setTimeout(r, 500));
+      return cutHelp(fs.readFileSync(file, 'utf8')) || undefined;
+    } catch (e: any) {
+      host.message('error', `Couldn't open the editor: ${e.message}`);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
   const store = new Store(boardFile, s => { try { if (s.source) syncSource(s); } catch (e: any) { host.log(e.message); } });
   const agents = new AgentWatcher(store);
-  let data: { board: Board; agents: Record<string, Agent> } | undefined;
+  let data: { board: Board; agents: Record<string, Agent>; factory: {
+    plans: Record<string, string>; stages: Record<string, string>; skills: Record<string, string[]>; efforts: string[];
+    targetBranch: string; builderMode: string; workers: number; roleAgents: Record<string, { roles: Record<string, string> }>;
+  } } | undefined;
   let push = () => {};
   const factory = new FactoryRunner(store, agents, path.join(path.dirname(boardFile), 'locks'), path.join(ROOT, 'agents'), () => push());
-  const shell = (p: Project) => { intent = { key: `shell:${p.id}`, label: `shell · ${p.name}` }; host.terminal(`Shell · ${p.name}`, p.path, [process.env.SHELL || 'sh']); };
+  const shell = (p: Project) => launch({ key: `shell:${p.id}`, label: `shell · ${p.name}` }, () => host.terminal(`Shell · ${p.name}`, p.path, [process.env.SHELL || 'sh']));
   const core = dashboardCore(store, agents, factory, (m: any) => { if (m?.type === 'board') { data = m; render(); } }, '', () => push(), cliProjects(store, shell));
   push = core.push;
   agents.onDidChange(push);
@@ -229,7 +151,8 @@ export async function tui(boardFile: string) {
   const leave = () => { out.write('\x1b[0m\x1b[?25h\x1b[?1049l'); if (process.stdin.isTTY) process.stdin.setRawMode(false); };
   let suspended = false;
   const tmuxSelf = process.env.TMUX_PANE;
-  if ((mode === 'nvim' || mode === 'auto') && process.env.NVIM) pane = nvimPane(process.env.NVIM);
+  const inNvim = (mode === 'nvim' || mode === 'auto') && !!process.env.NVIM;
+  if (inNvim) pane = nvimPane(process.env.NVIM!);
   else if ((mode === 'tmux' || mode === 'auto') && process.env.TMUX && tmuxSelf) pane = tmuxPane(tmuxSelf);
   else pane = inlinePane(() => { suspended = true; leave(); process.stdin.pause(); }, () => { suspended = false; enter(); });
   if (process.env.LEXCODE_TMUX && tmuxSelf) {
@@ -272,12 +195,72 @@ export async function tui(boardFile: string) {
     if (col < 0 || col > 3) { col = Math.max(0, Math.min(col, 3)); row = dy < 0 ? 0 : cs[col].length - 1; }
   };
 
+  const storyNeeds = (s: Story) => liveRun(s, data!.agents)?.state === 'blocked';
   const needsYou = (p: Project) => {
     const b = data!.board;
-    return b.stories.filter(s => s.projectId === p.id && liveRun(s, data!.agents)?.state === 'blocked').length
-      + b.epics.filter(e => e.projectId === p.id && (e.error || e.stage?.startsWith('awaiting'))).length
-      + b.sprints.filter(s => s.projectId === p.id && (s.blocked || s.state === 'awaitingMerge')).length;
+    return b.stories.filter(s => s.projectId === p.id && !s.epicId && storyNeeds(s)).length
+      + b.epics.filter(e => e.projectId === p.id && e.stage && epicNeeds(b, e, data!.agents)).length;
   };
+
+  /* ---------- epics screen: cursor over the epic list, then the selected epic's sprint rows ---------- */
+  let screen: 'board' | 'epics' = 'board';
+  let selEpic: string | undefined, selRow: string | undefined; // selRow undefined: cursor is on the epic list
+  const epicState = () => {
+    const es = data!.board.epics.filter(e => e.projectId === project()?.id && e.stage);
+    const e = es.find(x => x.id === selEpic) ?? es[0];
+    const v = e && epicView(data!.board, e, data!.agents, data!.factory.plans[e.id]);
+    const r = v?.rows.find(x => x.id === selRow);
+    return { es, e, v, r, at: r ? es.length + v!.rows.indexOf(r) : Math.max(0, es.indexOf(e!)) };
+  };
+  // j/k: the selected epic's line, then its rows. h/l: previous/next epic.
+  const epicStep = (dy: number) => {
+    const { e, v, r } = epicState();
+    if (!e || !v) return;
+    const n = Math.max(-1, Math.min((r ? v.rows.indexOf(r) : -1) + dy, v.rows.length - 1));
+    selEpic = e.id;
+    selRow = n < 0 ? undefined : v.rows[n].id;
+  };
+  const epicSwitch = (d: number) => {
+    const { es, e } = epicState();
+    if (!es.length) return;
+    selEpic = es[(es.indexOf(e!) + d + es.length) % es.length].id;
+    selRow = undefined;
+  };
+  const glyph = (e: Board['epics'][number]) => epicNeeds(data!.board, e, data!.agents) ? '!' : e.stage === 'done' ? '✓'
+    : e.stage === 'cancelled' || e.stage === 'failed' ? '✗' : e.stage === 'building' || e.stage?.match(/planning|revalidating|securityCheck/) ? '◉' : '·';
+
+  function renderEpics(W: number, body: number): { lines: string[]; footer: string } {
+    const { es, e, v, at } = epicState();
+    const b = data!.board;
+    const items: [string, string, boolean][] = []; // text, sgr, cursor
+    es.forEach((x, i) => {
+      const cur = i === at, sel = x === e;
+      items.push([`${cur ? '▸' : sel ? '›' : ' '} ${fit(x.title, Math.max(8, Math.floor(W * 0.35)))} ${fit(`${glyph(x)} ${data!.factory.stages[x.stage!] ?? x.stage}`, 28)} ${progress(b, x)}`,
+        cur ? '7' : epicNeeds(b, x, data!.agents) ? '33' : '', cur]);
+    });
+    if (!es.length) items.push(['  No factory epics in this project yet. N starts one.', '2', false]);
+    if (e && v) {
+      items.push(['─'.repeat(W), '2', false]);
+      const files = e.attachments?.length ? `   📎 ${e.attachments.map(a => a.name).join(', ')}` : '';
+      items.push([` ${e.title}   ${e.branch ? `${e.branch} → ${e.targetBranch ?? data!.factory.targetBranch}   ` : ''}${e.builderMode === 'auto' ? '🤖 Full auto' : '🛡 Accept edits'}${files}`, '1', false]);
+      items.push([` ${pipeline(b, e)}`, '', false]);
+      for (const l of v.lines) items.push([`   ${l}`, l.startsWith('✗') || l.startsWith('⚠') ? '31' : '2', false]);
+      if (v.rows.length) items.push(['', '', false]);
+      v.rows.forEach((r, i) => {
+        const cur = es.length + i === at;
+        items.push([`${cur ? '▸' : ' '} ${fit(r.text, Math.max(8, W - 42))} ${r.badge}`, cur ? '7' : r.needs ? '33' : '', cur]);
+        for (const l of r.lines) items.push([`      ${l}`, l.startsWith('✗') ? '31' : '2', false]);
+      });
+    }
+    const c = items.findIndex(i => i[2]);
+    scroll = Math.max(0, Math.min(scroll, c), c - body + 1);
+    const lines = Array.from({ length: body }, (_, i) => { const it = items[i + scroll]; return it ? sgr(it[1], fit(it[0], W)) : fit('', W); });
+    const keys = epicKeys();
+    const footer = [...Object.entries(keys).map(([k, a]) => `${k} ${a.label}`),
+      ...(help ? ['j/k rows', 'h/l epic', 'N new epic', 'g next needing you', '[ ] project', 'tab → pane', 'r reload', 'e board', 'q quit'] : ['h/l epic', 'N new', 'g next', 'e board', '? help'])].join('  ');
+    return { lines, footer: ` ${footer}` };
+  }
+  const epicKeys = (): Record<string, Act> => { const { v, r } = epicState(); return { ...v?.keys, ...r?.keys }; };
   const badge = (s: Story, st: ReturnType<Pane['state']>) => {
     const run = liveRun(s, data!.agents);
     if (st.open === s.id) return ['▣ open', '36'];
@@ -301,12 +284,16 @@ export async function tui(boardFile: string) {
     const running = Object.values(data.agents).filter(a => !['done', 'stopped', 'failed'].includes(a.state)).length;
     const needs = projects().reduce((n, x) => n + needsYou(x), 0);
     const right = `${running} running${needs ? ` · ${needs} need you` : ''} `;
-    const left = ` LexCode ─ ${p?.name ?? 'no projects (A to add)'}${projects().length > 1 ? '  [ ]' : ''}`;
+    const left = ` LexCode ─ ${p?.name ?? 'no projects (A to add)'}${p && screen === 'epics' ? ' ─ epics' : ''}${projects().length > 1 ? '  [ ]' : ''}`;
     lines.push(sgr('1', fit(left, W - right.length)) + sgr(needs ? '33' : '2', right));
     const body = H - 3;
     const cs = columns();
+    let footer = help
+      ? ' ⏎/a attach  c new session  H/L move status  n new story  d delete  o shell  e epics  N new epic  g next needing you  A add project  i import  tab → pane  r reload  q quit'
+      : ' ⏎ attach  H/L status  n new  e epics  g next  tab → claude  ? help  q quit';
 
     if (!p) for (let i = 0; i < body; i++) lines.push(fit(i === 1 ? '  A add a project folder   q quit' : '', W));
+    else if (screen === 'epics') { const ev = renderEpics(W, body); lines.push(...ev.lines); footer = ev.footer; }
     else if (narrow()) {
       // Grouped list: [label, sgr, isSelected]
       const items: [string, string, boolean][] = [];
@@ -354,9 +341,7 @@ export async function tui(boardFile: string) {
       if (flash && Date.now() - flash.at > 8000) flash = undefined;
       lines.push(flash ? sgr(flash.level === 'error' ? '31' : flash.level === 'warn' ? '33' : '32', fit(` ${flash.text}`, W))
         : sgr('2', fit(st.parked.length ? ` parked: ${st.parked.length} Claude pane${st.parked.length > 1 ? 's' : ''}` : '', W)));
-      lines.push(sgr('2', fit(help
-        ? ' ⏎/a attach  c new session  H/L move status  n new story  d delete  o shell  A add project  i import  tab → pane  r reload  q quit'
-        : ' ⏎ attach  H/L status  n new  tab → claude  ? help  q quit', W)));
+      lines.push(sgr('2', fit(footer, W)));
     }
     out.write('\x1b[H' + lines.slice(0, H).join('\r\n'));
   }
@@ -368,10 +353,137 @@ export async function tui(boardFile: string) {
       return host.message('warn', 'This card already has a Claude pane. Exit that Claude first, then start a new session.');
     }
     if (!fresh && pane.show(s.id)) return render();
-    intent = { key: s.id, label: s.title };
     const run = liveRun(s, data!.agents);
-    core.handle(fresh ? { type: 'newSession', id: s.id } : run ? { type: 'attach', id: s.id, sessionId: run.sessionId } : { type: 'claude', id: s.id });
+    launch({ key: s.id, label: s.title }, () =>
+      core.handle(fresh ? { type: 'newSession', id: s.id } : run ? { type: 'attach', id: s.id, sessionId: run.sessionId } : { type: 'claude', id: s.id }));
   };
+  const gate = (epicId: string, decision: string, extra: Record<string, unknown> = {}) => core.handle({ type: 'factoryGate', epicId, decision, ...extra });
+  const builders = async (value: number) => {
+    const n = Number(await host.input('Builders: how many sprints may build at once (1–8)', String(value)));
+    return Number.isInteger(n) && n >= 1 && n <= 8 ? n : undefined;
+  };
+  const PR_VIA: [string, string][] = [['auto', 'Auto (GitHub → gh, else Gitea)'], ['gh', 'GitHub (gh)'], ['tea', 'Gitea (tea)'], ['skill', 'Claude skill…']];
+
+  async function runAct(act: Act) {
+    const { e } = epicState();
+    if (!e) return;
+    if ('msg' in act) {
+      if (act.msg.type === 'attachEpic') return launch({ key: String(act.msg.sessionId), label: e.title }, () => core.handle(act.msg));
+      return core.handle(act.msg);
+    }
+    if ('plan' in act) return core.handle({ type: 'openPlan', epicId: e.id, source: act.plan === 'source' });
+    if ('url' in act) return host.openExternal(act.url);
+    const f = data!.factory;
+    switch (act.ask) {
+      case 'changes': {
+        const text = await editText('', `What should change in the plan for "${e.title}"?\nThis goes back to the orchestrator, which plans again.`);
+        if (text) gate(e.id, 'changes', { text });
+        return;
+      }
+      case 'sendBack': {
+        const text = await editText('', 'What should the builder fix before this sprint is merged?');
+        if (text) gate(e.id, 'sendBack', { sprintId: act.sprintId, text });
+        return;
+      }
+      case 'start': case 'workers': {
+        const n = await builders(e.workers ?? f.workers ?? 1);
+        if (n) gate(e.id, act.ask, { workers: n });
+        return;
+      }
+      case 'prOpened': {
+        const url = (await host.input('URL of the PR the skill opened'))?.trim();
+        if (url && /^https?:\/\/\S+$/.test(url)) gate(e.id, 'prOpened', { url });
+        else if (url) host.message('error', `"${url}" isn't an http(s) URL.`);
+        return;
+      }
+      case 'createPr': {
+        const p = data!.board.projects.find(x => x.id === e.projectId);
+        const label = await host.message('info', `Open a PR for "${e.title}" with`, undefined, ...PR_VIA.map(v => v[1]));
+        const via = PR_VIA.find(v => v[1] === label)?.[0];
+        if (!via) return;
+        let skill: string | undefined;
+        if (via === 'skill') {
+          const skills = f.skills[e.projectId] ?? [];
+          if (!skills.length) return host.message('error', `No Claude skills found in ${p?.name ?? 'this project'}.`);
+          skill = (await host.message('info', 'Which skill opens the PR?', undefined, ...skills.map(s => `/${s}`)))?.slice(1);
+          if (!skill) return;
+        }
+        const targetBranch = (await host.input('PR target branch', e.targetBranch ?? f.targetBranch))?.trim();
+        if (!targetBranch) return;
+        if (!validBranch(targetBranch)) return host.message('error', `"${targetBranch}" isn't a valid branch name.`);
+        gate(e.id, 'createPr', { targetBranch, via, skill });
+        return;
+      }
+    }
+  }
+
+  // N: the dashboard's epic form as a run of prompts. Nothing is created until the last one; esc anywhere cancels.
+  async function newEpic(p: Project) {
+    const f = data!.factory;
+    const title = (await host.input(`New factory epic in ${p.name}: title`))?.trim();
+    if (!title) return;
+    const MODES = ['Accept edits', 'Full auto', 'Manual epic (no factory)'];
+    const how = await host.message('info', `"${title}": how should builders run?`,
+      { detail: `default ${f.builderMode === 'auto' ? 'Full auto' : 'Accept edits'}` }, ...(f.builderMode === 'auto' ? [MODES[1], MODES[0], MODES[2]] : MODES));
+    if (!how) return;
+    if (how === MODES[2]) { core.handle({ type: 'addEpic', id: p.id, start: false, title }); return; }
+    if (how === MODES[1] && !await host.message('warn', 'Full auto: builders run shell commands without asking you. Use it?', undefined, 'Yes, full auto')) return;
+    const description = await editText('', `Describe "${title}": goal, constraints, acceptance criteria.\nThe orchestrator plans sprints and stories from this.`);
+    if (description === undefined) return;
+    let targetBranch: string | undefined = f.targetBranch;
+    for (;;) {
+      targetBranch = (await host.input('Target branch for the PR', targetBranch))?.trim();
+      if (!targetBranch) return;
+      if (validBranch(targetBranch)) break;
+      host.message('error', `"${targetBranch}" isn't a valid branch name.`);
+    }
+    const models: Record<string, { model: string; effort: string }> = {};
+    const m = await host.message('info', 'Models', { detail: 'defaults: planner opus/high, builder and reviewer from settings' }, 'Defaults', 'Customize');
+    if (!m) return;
+    if (m === 'Customize') for (const role of ['planner', 'builder', 'reviewer']) {
+      const model = await host.message('info', `${role} model`, undefined, 'default', 'opus', 'sonnet', 'haiku', 'fable');
+      const effort = model && await host.message('info', `${role} effort`, undefined, 'default', ...f.efforts);
+      if (!model || !effort) return;
+      models[role] = { model: model === 'default' ? '' : model, effort: effort === 'default' ? '' : effort };
+    }
+    let attachments: ReturnType<typeof readRefs> = [];
+    for (;;) {
+      const refs = await host.input('Reference files: comma-separated paths (empty for none)', '');
+      if (refs === undefined) return;
+      try { attachments = readRefs(refs, p.path); break; } catch (e: any) { host.message('error', e.message); }
+    }
+    const roles = Object.entries(f.roleAgents[p.id]?.roles ?? {}).map(([r, a]) => `${r}: ${a}`).join(', ');
+    const go = await host.message('info', `Start planning "${title}"?`, { detail: [how, `→ ${targetBranch}`,
+      attachments.length && `${attachments.length} file${attachments.length > 1 ? 's' : ''}`, roles && `agents ${roles}`].filter(Boolean).join(' · ') }, 'Start planning');
+    if (!go) return;
+    await core.handle({ type: 'addEpic', id: p.id, start: true, title, description, targetBranch, builderMode: how === MODES[1] ? 'auto' : 'acceptEdits', models, attachments });
+    screen = 'epics';
+    selEpic = data!.board.epics.find(x => x.projectId === p.id && x.title === title && x.stage)?.id;
+    selRow = undefined;
+    render();
+  }
+
+  // g: the next thing waiting on you, in any project: epic gates/errors/blocked sprints, then blocked background runs.
+  function nextNeeding() {
+    const b = data!.board, ps = projects();
+    const spots: { pi: number; epic?: string; row?: string; story?: Story }[] = [];
+    ps.forEach((p, i) => {
+      for (const e of b.epics.filter(x => x.projectId === p.id && x.stage && epicNeeds(b, x, data!.agents))) {
+        const rows = epicView(b, e, data!.agents).rows.filter(r => r.needs);
+        if (rows.length) rows.forEach(r => spots.push({ pi: i, epic: e.id, row: r.id }));
+        else spots.push({ pi: i, epic: e.id });
+      }
+      for (const s of b.stories.filter(x => x.projectId === p.id && !x.archived && !x.epicId && storyNeeds(x))) spots.push({ pi: i, story: s });
+    });
+    if (!spots.length) return host.message('info', 'Nothing needs you right now.');
+    const here = spots.findIndex(x => x.pi === pi && (screen === 'epics' ? x.epic === selEpic && x.row === selRow : x.story?.id === selId));
+    // From the current spot on; otherwise the first one in or after the current project.
+    const next = here >= 0 ? spots[(here + 1) % spots.length] : spots.find(x => x.pi >= pi) ?? spots[0];
+    pi = next.pi;
+    if (next.story) { screen = 'board'; selId = next.story.id; }
+    else { screen = 'epics'; selEpic = next.epic; selRow = next.row; }
+  }
+
   const quit = () => {
     quitting = true;
     leave();
@@ -402,7 +514,26 @@ export async function tui(boardFile: string) {
     }
     if (!data) return;
     const p = project(), s = selected(), at = [pi, col, row].join();
-    switch (key.name === 'return' ? 'return' : str ?? key.name) {
+    const k = key.name === 'return' ? 'return' : str ?? key.name ?? '';
+    // Both screens
+    if (k === 'e' && p) { screen = screen === 'board' ? 'epics' : 'board'; scroll = 0; return render(); }
+    if (k === 'N' && p) { newEpic(p).catch(e => host.message('error', e.message)); return; }
+    if (k === 'g') { nextNeeding(); scroll = 0; return render(); }
+    if (screen === 'epics' && p) {
+      const acts = epicKeys();
+      if (k === 'q') return quit();
+      if (k === 'j' || key.name === 'down') epicStep(1);
+      else if (k === 'k' || key.name === 'up') epicStep(-1);
+      else if (k === 'h' || key.name === 'left') epicSwitch(-1);
+      else if (k === 'l' || key.name === 'right') epicSwitch(1);
+      else if (k === '[' || k === ']') { pi = (pi + (k === '[' ? -1 : 1) + projects().length) % Math.max(1, projects().length); selEpic = selRow = undefined; scroll = 0; }
+      else if (k === 'r') { store.reload(); push(); }
+      else if (k === '?') help = !help;
+      else if (k === 'tab' || k === '\t') pane.focus();
+      else if (acts[k] || (k === 'return' && acts.a)) runAct(acts[k] ?? acts.a).catch(e => host.message('error', e.message));
+      return render();
+    }
+    switch (k) {
       case 'q': return quit();
       case 'j': step(1); break;
       case 'k': step(-1); break;

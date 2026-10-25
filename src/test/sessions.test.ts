@@ -3,7 +3,7 @@ import * as assert from 'node:assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { listSessions, sessionDir, sessionTitle, sessionExists, editedFiles, finalMessage } from '../sessions';
+import { listSessions, sessionDir, sessionTitle, sessionExists, editedFiles, finalMessage, turnEnded } from '../sessions';
 
 const rec = (o: object) => JSON.stringify(o);
 
@@ -76,4 +76,19 @@ test('finalMessage since: ignores replies older than the current run', () => {
   assert.equal(finalMessage('/p', 's', home, since), undefined);
   fs.appendFileSync(path.join(dir, 's.jsonl'), '\n' + say('new', '2026-01-03T00:00:00Z'));
   assert.equal(finalMessage('/p', 's', home, since), 'new');
+});
+
+test('turnEnded: finished turn vs waiting mid-turn on a permission prompt', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lex-home-'));
+  const dir = sessionDir('/p', home);
+  fs.mkdirSync(dir, { recursive: true });
+  const write = (...lines: object[]) => fs.writeFileSync(path.join(dir, 's.jsonl'), lines.map(rec).join('\n') + '\n');
+  const ask = { type: 'assistant', message: { content: [{ type: 'tool_use', id: 't', name: 'Bash' }] } };
+  write({ type: 'user', message: { content: 'go' } }, ask);
+  assert.equal(turnEnded('/p', 's', home), false);
+  write(ask, { type: 'assistant', message: { content: [{ type: 'text', text: 'done' }] } }, { type: 'system', subtype: 'turn_duration' }, { type: 'ai-title', aiTitle: 'x' });
+  assert.equal(turnEnded('/p', 's', home), true);
+  write({ type: 'system', subtype: 'turn_duration' }, { type: 'user', message: { content: 'follow-up' } });
+  assert.equal(turnEnded('/p', 's', home), false);
+  assert.equal(turnEnded('/p', 'missing', home), false);
 });
