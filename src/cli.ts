@@ -1,6 +1,9 @@
-// Headless TASKS.md -> board sync, for Claude skills and scripts:
-//   node out/cli.js sync [projectPath] [--dry-run] [--epic <name>]
-// Board file: $LEXCODE_BOARD, else the first existing VS Code-family globalStorage copy.
+#!/usr/bin/env node
+// LexCode outside VS Code:
+//   lexcode [tui]                                          board in the terminal; Claude opens in a tmux/Neovim pane
+//   lexcode ui [--port 7420] [--no-open] [--verbose]       dashboard at http://127.0.0.1:7420
+//   lexcode sync [projectPath] [--dry-run] [--epic <name>]  TASKS.md -> board, for Claude skills and scripts
+// Board file: $LEXCODE_BOARD, else the newest VS Code-family globalStorage copy, else ~/.lexcode/board.json.
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -15,13 +18,22 @@ function boardFile(): string {
   const hits = ['Code', 'Code - Insiders', 'Cursor', 'Windsurf', 'VSCodium', 'Devin']
     .map(app => path.join(base, app, 'User', 'globalStorage', 'lex.lex-code', 'board.json'))
     .filter(f => fs.existsSync(f));
-  if (!hits.length) throw new Error('LexCode board.json not found; set LEXCODE_BOARD');
+  if (!hits.length) return path.join(os.homedir(), '.lexcode', 'board.json'); // no IDE: standalone board
   return hits.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
 }
 
-function main(argv: string[]) {
-  const [cmd, ...rest] = argv;
-  if (cmd !== 'sync') throw new Error('usage: lexcode sync [projectPath] [--dry-run] [--epic <name>]');
+const USAGE = 'usage: lexcode [tui]\n       lexcode ui [--port 7420] [--no-open] [--verbose]\n       lexcode sync [projectPath] [--dry-run] [--epic <name>]';
+
+async function main(argv: string[]) {
+  const [cmd = 'tui', ...rest] = argv;
+  if (cmd === 'tui') return (await import('./tui')).tui(boardFile());
+  if (cmd === 'ui') {
+    const pi = rest.indexOf('--port'), port = pi >= 0 ? Number(rest[pi + 1]) : 7420;
+    if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('--port needs a port number');
+    const { serve } = await import('./server'); // keeps ws/node-pty out of `sync`
+    return serve(boardFile(), { port, open: !rest.includes('--no-open'), verbose: rest.includes('--verbose') });
+  }
+  if (cmd !== 'sync') throw new Error(USAGE);
   const dryRun = rest.includes('--dry-run');
   const ei = rest.indexOf('--epic');
   const epic = ei >= 0 ? rest[ei + 1] : undefined;
@@ -43,4 +55,4 @@ function main(argv: string[]) {
   if (!r.added.length && !r.updated.length && !r.archived.length) console.log('in sync');
 }
 
-try { main(process.argv.slice(2)); } catch (e: any) { console.error(e.message); process.exit(1); }
+main(process.argv.slice(2)).catch((e: any) => { console.error(e.message); process.exit(1); });

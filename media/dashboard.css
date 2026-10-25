@@ -246,3 +246,34 @@ button.quiet:hover { background: transparent; color: var(--vscode-errorForegroun
 .modal aside label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--vscode-foreground); font-size: 0.9em; }
 .modal aside label.check input { width: auto; margin: 0; }
 .modal aside h4 { margin: 8px 0 0; }
+
+/* Markdown: rendered text (.md-body) and the GitHub-style description editor (media/markdown.js). */
+.md-body { line-height: 1.55; overflow-wrap: anywhere; }
+.md-body h1 { font-size: 1.5em; }
+.md-body h2 { font-size: 1.2em; margin-top: 1.4em; border-bottom: 1px solid var(--vscode-panel-border); padding-bottom: 4px; }
+.md-body code { font-family: var(--vscode-editor-font-family); background: var(--vscode-sideBar-background); padding: 1px 4px; border-radius: 3px; }
+.md-body pre { background: var(--vscode-sideBar-background); padding: 10px; border-radius: 6px; overflow: auto; }
+.md-body pre code { background: none; padding: 0; }
+.md-body table { border-collapse: collapse; }
+.md-body th, .md-body td { border: 1px solid var(--vscode-panel-border); padding: 4px 8px; text-align: left; }
+.md-body a { color: var(--vscode-textLink-foreground); }
+.md-source { white-space: pre-wrap; font-family: var(--vscode-editor-font-family); font-size: 12px; }
+.md-body blockquote { margin: 0; padding-left: 12px; border-left: 3px solid var(--line); color: var(--vscode-descriptionForeground); }
+.md-body ul, .md-body ol { padding-left: 22px; }
+.md-body li:has(> input[type=checkbox]) { list-style: none; margin-left: -18px; }
+.md-editor { border: 1px solid var(--vscode-input-border, var(--line)); border-radius: var(--radius); background: var(--vscode-input-background); }
+.md-editor:focus-within { border-color: var(--vscode-focusBorder); }
+.md-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 4px 6px; border-bottom: 1px solid var(--line); background: var(--surface); border-radius: var(--radius) var(--radius) 0 0; }
+.md-bar .md-tab { background: transparent; color: var(--vscode-descriptionForeground); padding: 4px 10px; }
+.md-bar .md-tab.on { color: var(--vscode-foreground); background: var(--vscode-input-background); box-shadow: 0 0 0 1px var(--line); }
+.md-tools { margin-left: auto; display: flex; flex-wrap: wrap; gap: 1px; }
+.md-tools[hidden] { display: none; }
+.md-tool { background: transparent; color: var(--vscode-descriptionForeground); padding: 3px 7px; min-width: 26px; }
+.md-tool:hover { color: var(--vscode-foreground); background: var(--vscode-button-secondaryHoverBackground, var(--line)); }
+.md-tool[title^="Bold"] { font-weight: 700; }
+.md-tool[title^="Italic"] { font-style: italic; font-family: Georgia, serif; }
+.md-tool[title^="Code"] { font-family: var(--vscode-editor-font-family); font-size: 0.9em; }
+.modal .md-editor textarea.md-input { border: none; border-radius: 0; background: transparent; display: block; outline: none; }
+.md-preview { min-height: 180px; padding: 8px 12px; }
+.md-hint { margin: 0; padding: 3px 10px 5px; font-size: 0.8em; border-top: 1px dashed var(--line); }
+.md-editor [hidden] { display: none !important; }

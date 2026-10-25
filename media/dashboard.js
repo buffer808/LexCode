@@ -250,7 +250,10 @@ function epicStrip(e) {
         h('div', { class: 'facts' },
           h('span', { class: 'badge stage-' + e.stage }, f.stages[e.stage] ?? e.stage),
           h('span', { title: e.builderMode === 'auto' ? 'Builders run unattended' : 'Builders pause for shell approvals' }, e.builderMode === 'auto' ? '🤖 Full auto' : '🛡 Accept edits'),
-          e.branch && h('span', { title: 'Epic branch → PR target' }, h('code', {}, e.branch), ` → ${e.targetBranch ?? f.targetBranch}`))),
+          e.branch && h('span', { title: 'Epic branch → PR target' }, h('code', {}, e.branch), ` → ${e.targetBranch ?? f.targetBranch}`),
+          e.attachments?.length > 0 && h('span', { title: 'Reference files given to every factory session' }, '📎 ',
+            e.attachments.map(a => h('button', { class: 'link', title: `Open ${a.name}`,
+              onclick: () => vscode.postMessage({ type: 'openEpicAttachment', epicId: e.id, attachmentId: a.id }) }, a.name))))),
       h('div', { class: 'actions' },
         own && h('button', { class: onBoard ? 'on' : '', 'aria-pressed': String(onBoard), title: 'Show this epic\'s stories on the board below',
           onclick: () => onBoard ? select(e.projectId, null, null) : select(e.projectId, ALL, e.id) }, onBoard ? '✓ On board' : 'Show on board'),
@@ -378,7 +381,29 @@ function openEpicForm(project) {
   const ra = f.roleAgents[project.id] ?? { agents: [], roles: {} };
   const field = (label, el) => h('label', {}, label, el);
   const title = h('input', { class: 'title', placeholder: 'Epic title', 'aria-label': 'Epic title' });
-  const desc = h('textarea', { placeholder: 'Goal, constraints, acceptance criteria. The orchestrator plans from this.', 'aria-label': 'Description' });
+  const desc = h('textarea', { 'data-key': 'epic-desc', placeholder: 'Goal, constraints, acceptance criteria. The orchestrator plans from this. Paste screenshots here.', 'aria-label': 'Description',
+    onpaste: e => { const fs = pasted(e); if (fs.length) { e.preventDefault(); addRefs(fs); } } });
+  // Reference files (screenshots, mockups): held here until the epic is created, then sent with it.
+  const refs = [];
+  const refInput = h('input', { type: 'file', multiple: '', hidden: '', onchange: e => { addRefs(e.target.files); e.target.value = ''; } });
+  const refBox = h('div', { class: 'files',
+    ondragover: e => { e.preventDefault(); refBox.classList.add('over'); },
+    ondragleave: () => refBox.classList.remove('over'),
+    ondrop: e => { e.preventDefault(); refBox.classList.remove('over'); addRefs(e.dataTransfer.files); } });
+  const drawRefs = () => refBox.replaceChildren(...refs.map((r, i) => h('div', { class: 'file' },
+      h('span', { class: 'thumb', title: r.name }, r.mime.startsWith('image/') ? h('img', { src: r.url, alt: r.name }) : h('span', { class: 'ext' }, '📄'),
+        h('span', { class: 'name' }, r.name)),
+      h('button', { class: 'x', title: 'Remove', 'aria-label': `Remove ${r.name}`, onclick: () => { refs.splice(i, 1); drawRefs(); } }, '×'))),
+    h('button', { class: 'drop', onclick: () => refInput.click() }, 'Drop screenshots or files, paste into the description, or click to attach'), refInput);
+  function addRefs(files) {
+    for (const f of files) {
+      if (f.size > 25 * 1024 * 1024) { err.textContent = `${f.name} is over 25 MB.`; continue; }
+      const r = new FileReader();
+      r.onload = () => { refs.push({ name: f.name, mime: f.type, url: String(r.result), data: String(r.result).split(',')[1] }); drawRefs(); };
+      r.readAsDataURL(f);
+    }
+  }
+  drawRefs();
   const mode = h('select', {}, h('option', { value: 'acceptEdits', selected: f.builderMode !== 'auto' }, '🛡 Accept edits: builders pause for shell approvals'),
     h('option', { value: 'auto', selected: f.builderMode === 'auto' }, '🤖 Full auto: builders run unattended'));
   const target = h('input', { value: f.targetBranch, 'aria-label': 'Target branch' });
@@ -402,13 +427,14 @@ function openEpicForm(project) {
     vscode.postMessage({ type: 'addEpic', id: project.id, start, title: title.value, description: desc.value, targetBranch: target.value, builderMode: mode.value,
       roleAgents: Object.fromEntries(Object.entries(roles).map(([r, el]) => [r, el.value])),
       reviewers: reviewers.filter(c => c.checked).map(c => c.value),
-      models: Object.fromEntries(Object.entries(models).map(([r, m]) => [r, { model: m.model.value, effort: m.effort.value }])) });
+      models: Object.fromEntries(Object.entries(models).map(([r, m]) => [r, { model: m.model.value, effort: m.effort.value }])),
+      attachments: refs.map(({ name, mime, data }) => ({ name, mime, data })) });
     epicDialog.close();
   };
   epicDialog.replaceChildren(h('div', { class: 'modal' },
     h('header', {}, title, h('button', { class: 'x close', title: 'Close', 'aria-label': 'Close', onclick: () => epicDialog.close() }, '×')),
     h('div', { class: 'body' },
-      h('main', {}, h('h4', {}, 'Description'), desc,
+      h('main', {}, h('h4', {}, 'Description'), mdEditor(desc), h('h4', {}, 'Reference screenshots & files'), refBox,
         h('details', { class: 'models' }, h('summary', {}, 'Models & effort'),
           h('div', { class: 'grid' }, Object.entries(models).map(([r, m]) => [h('span', {}, MODEL_ROLES[r]), m.model, m.effort])))),
       h('aside', {},
@@ -451,6 +477,10 @@ function openStory(id) {
 const send = (type, extra) => vscode.postMessage({ type, id: openStoryId, ...extra });
 const update = patch => send('update', { patch });
 
+// Clipboard files; pasted screenshots all arrive as image.png, so give them distinct names.
+const pasted = e => [...e.clipboardData.files].map((f, i) =>
+  f.name === 'image.png' ? new File([f], `screenshot-${Date.now()}-${i}.png`, { type: f.type }) : f);
+
 function upload(files) {
   for (const f of files) {
     const r = new FileReader();
@@ -479,11 +509,7 @@ function renderStory() {
     onchange: e => e.target.value.trim() && update({ title: e.target.value }) });
   const desc = h('textarea', { 'data-key': 'desc', placeholder: 'Add a description… (paste screenshots here)', 'aria-label': 'Description',
     onchange: e => update({ description: e.target.value }),
-    onpaste: e => {
-      const files = [...e.clipboardData.files].map((f, i) =>
-        f.name === 'image.png' ? new File([f], `screenshot-${Date.now()}-${i}.png`, { type: f.type }) : f);
-      if (files.length) { e.preventDefault(); upload(files); }
-    } });
+    onpaste: e => { const files = pasted(e); if (files.length) { e.preventDefault(); upload(files); } } });
   desc.value = s.description ?? '';
 
   const fileInput = h('input', { type: 'file', multiple: '', hidden: '', onchange: e => { upload(e.target.files); e.target.value = ''; } });
@@ -542,7 +568,7 @@ function renderStory() {
   dialog.replaceChildren(h('div', { class: 'modal' },
     h('header', {}, title, h('button', { class: 'x close', title: 'Close', 'aria-label': 'Close', onclick: () => dialog.close() }, '×')),
     h('div', { class: 'body' },
-      h('main', {}, h('h4', {}, 'Description'), desc, h('h4', {}, `Attachments (${s.attachments?.length ?? 0})`), files,
+      h('main', {}, h('h4', {}, 'Description'), mdEditor(desc), h('h4', {}, `Attachments (${s.attachments?.length ?? 0})`), files,
         s.refs?.length ? [h('h4', {}, `Task files (${s.refs.length})`), h('ul', { class: 'edits' }, s.refs.map(f => {
           const root = data.board.projects.find(p => p.id === s.projectId)?.path ?? '';
           const rel = f.startsWith(root + '/') ? f.slice(root.length + 1) : f;

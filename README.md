@@ -43,6 +43,43 @@ Devin's editor is VS Code-based, so it installs the same `.vsix`:
 
 Background runs and the sparkle action need the `claude` CLI available in Devin's environment (set `lexCode.claudePath` if it isn't on `PATH`).
 
+### Use without VS Code (`lexcode ui`)
+
+The same dashboard runs in your browser, with Claude sessions in browser terminal tabs:
+
+```sh
+npm install -g github:buffer808/LexCode   # or, from a clone: npm install -g .
+lexcode ui                                 # opens http://127.0.0.1:7420/?t=<token>
+```
+
+- **Board:** shares `board.json` with the extension when VS Code (or Cursor, Windsurf, …) has one, so both stay in sync and can run at once; otherwise `~/.lexcode/board.json`. Override with `LEXCODE_BOARD`.
+- **Attach / Claude ▶ / resume** open a new window of your default terminal app running `claude attach …` (or the session) in the project. On macOS that's whichever app opens `.command` files (Terminal, or iTerm etc. if you made it the default); on Linux `$TERMINAL`, else `x-terminal-emulator`/`gnome-terminal`/`konsole`/`xterm`; on Windows `cmd`. Closing the window detaches; a background run keeps going. Prefer terminals in the browser? Set `"lexCode.ui.terminal": "browser"`.
+- **Factory:** `lexcode ui` drives factory epics too; the per-epic lock means only one window (browser server or VS Code) drives each epic.
+- **Settings:** `~/.lexcode/settings.json`, same keys as VS Code, e.g. `{ "lexCode.claudePath": "/opt/homebrew/bin/claude", "lexCode.factory.targetBranch": "dev" }`.
+- **Differences:** *Add project* takes a folder path; *Import tasks* imports everything in TASKS.md (no picker or Claude review); files open in VS Code (`code`) if it's on `PATH`, else the system default app.
+- **Security:** listens on `127.0.0.1` only and needs the token in the printed link (kept in `~/.lexcode/ui-token`, stored as a cookie). Anyone with that link can run Claude on your projects, so don't share it. Options: `--port <n>`, `--no-open`, `--verbose`.
+- Needs Node 20+. On Linux, `node-pty` compiles on install (needs `python3`, `make`, a C++ compiler).
+
+### Use in the terminal (`lexcode tui`)
+
+The board in your terminal. Attaching a card opens its Claude session in one pane on the right; the board stays live on the left.
+
+```sh
+lexcode          # same as `lexcode tui`
+```
+
+- **Where Claude opens:**
+  - Inside **Neovim**'s `:terminal` (run `:terminal lexcode`): a vertical split in that Neovim.
+  - Inside **tmux**: a pane split off on the right.
+  - Plain terminal with tmux installed: `lexcode` starts (or reattaches to) a tmux session named `lexcode` and works as above.
+  - Otherwise Claude takes over the terminal and the board comes back when it exits.
+  - Force one with `"lexCode.tui.terminal": "tmux" | "nvim" | "inline"` in `~/.lexcode/settings.json`.
+- **One Claude pane at a time.** Attaching another card parks the current pane, which keeps running: a hidden `⏸ <card>` window in tmux, a hidden buffer in Neovim. Attaching a parked card swaps its pane back in, so no second Claude starts on the same session. Cards show `▣ open`, `⏸ parked`, `◉ running`, `! approve`, or `↻` (has sessions). When Claude exits, its pane closes.
+- **Keys:** arrows or `hjkl` move, `⏎`/`a` attach, `c` new session, `H`/`L` move status, `n` new story, `d` delete, `[`/`]` switch project, `o` shell in the project, `A` add project, `i` import tasks, `tab` jump to the Claude pane, `?` all keys, `q` quit. Get back from Claude with your tmux prefix plus an arrow key, or `<C-\><C-n><C-w>h` in Neovim.
+- Below 100 columns (for example next to a Claude pane) the board becomes one list grouped by status.
+- Shares `board.json`, settings, and factory locks with VS Code and `lexcode ui`. The factory advances while any of them runs. Factory gates (approve plan, merge, PR) aren't in the TUI yet: use the dashboard.
+- Logs go to `~/.lexcode/tui.log`.
+
 ## Usage
 
 Open the **LexCode** icon in the activity bar to see the **Board** view.
@@ -81,6 +118,8 @@ The same sync runs headless, for Claude Code or scripts:
 
 ```sh
 node ~/.vscode/extensions/lex.lex-code-0.0.4/out/cli.js sync [projectPath] [--dry-run] [--epic <name>]
+# or, with lexcode installed globally:
+lexcode sync [projectPath] [--dry-run] [--epic <name>]
 ```
 
 It finds `board.json` in your editor's global storage (override with `LEXCODE_BOARD`).
@@ -144,6 +183,11 @@ Use **⏸ Pause** to stop new sessions from starting; running ones finish. Backg
   - the agent for each planning and build role, and one or more reviewers for the review panel;
   - optionally, the model and effort for each role.
 - **Existing epics:** run **Run Software Factory on Epic** from an epic's context menu.
+- **From Claude Code:** `/lexcode-factory <epic title and description>` opens the same prompts with the description filled in. Install the skill once:
+
+  ```sh
+  mkdir -p ~/.claude/skills/lexcode-factory && cp skills/lexcode-factory/SKILL.md ~/.claude/skills/lexcode-factory/
+  ```
 - **Your own agents:** agents in the project's (or your) `.claude/agents/` are used for matching roles, matched by name: *orchestrator/planner/architect/lead*, *validator/analyst*, *security/audit*, *review/qa*, *builder/developer/engineer*. Every other agent is offered to each session as a subagent to delegate to. To map agents explicitly, add `.lexcode/factory.json` to the project:
 
   ```json
@@ -158,6 +202,91 @@ Use **⏸ Pause** to stop new sessions from starting; running ones finish. Backg
   - Creating PRs needs the GitHub CLI (`gh`) logged in, a `tea` login for Gitea, or a PR skill.
 - **Where plans are stored:** `.lexcode/epics/<epicId>/plan.{json,md}`. `.lexcode/` is added to `.git/info/exclude`.
 
+#### What the factory picks up
+
+The factory works on **epics**, not single stories. It builds only stories that its own plan put into the epic's sprints. Stories you add by hand are treated like this:
+
+| Where the story is | Built by the factory? |
+| --- | --- |
+| Backlog (no sprint), even when linked to a factory epic | No |
+| A factory sprint that hasn't started yet | Yes, when the sprint starts |
+| A factory sprint that is building | Yes, after the stories ahead of it |
+| A factory sprint in review, fixing, waiting for merge, or merged | No. It stays in TODO and the sprint goes on without it |
+| A manual (non-factory) epic or sprint | No |
+
+The orchestrator plans from the epic's **title and description only**. It doesn't read stories already on the epic, and it creates new stories of its own. To automate work you've already written as a story, see [Automate a backlog story](#automate-a-backlog-story).
+
+## Use cases
+
+### Track several projects by hand (no automation)
+
+1. **Add Project** for each folder.
+2. Create epics and sprints. When asked how builders should run, choose **Manual epic**, or turn off `lexCode.factory.autoStart`.
+3. Add stories, then move them across `todo` → `doing` → `review` → `done`, in the Board view (**Set Status**) or by dragging cards on the dashboard.
+
+### Bring an existing TASKS.md onto the board
+
+1. **Import Tasks from TASKS.md** → **Review with Claude** (Claude weeds out finished or obsolete items) or **Pick manually**.
+2. Keep editing TASKS.md, then run **Sync from TASKS.md** or `/lexcode-sync` to push the changes. See [Sync](#sync-from-tasksmd).
+
+### Work on one story with Claude, yourself
+
+- **Interactive:** click the sparkle icon (or **Claude ▶** on the card). The session starts with the story's title, description and attachments, and is saved on the story.
+- **Background:** open the card → **Run in background**, and pick a permission mode. You get a notification when it finishes or needs approval. Use **Attach** to step in.
+- **Pick up later:** **Claude ↻** / **Resume Claude Session** reopens the saved session.
+
+### Build a feature end to end with the factory
+
+1. **+ Epic** on the dashboard (or **New Epic**). Describe the goal, constraints and acceptance criteria. This description is all the orchestrator sees.
+2. Wait for the plan → **View plan** → **Approve**, or **Request changes**.
+3. Set **Builders** → **▶ Start build**.
+4. Step in only when asked: a story that failed review too many times, a critical merge, or the final **Create PR**.
+
+### Automate a backlog story
+
+No single-story command exists yet. Wrap the story in an epic instead:
+
+1. Create a manual epic named after the story (or reuse an existing one).
+2. Right-click the epic → **Run Software Factory on Epic**. When asked for a description, paste the story's description and acceptance criteria.
+3. Once the plan is approved, the factory creates its own stories for this work. Archive or delete the original backlog story so it doesn't sit there twice.
+
+### Add work to a factory epic that is already running
+
+- Add the story to a factory sprint that is **waiting** or **building**. The factory builds it in order.
+- If every sprint is past building, the factory won't build the story. Do it yourself with Claude ([see above](#work-on-one-story-with-claude-yourself)), or plan it as a new epic.
+
+### Rework or stop a factory epic
+
+- **Plan is off:** at the plan gate, choose **Request changes** with a note. The orchestrator revises the plan.
+- **Sprint is off:** on a critical merge, choose **Send back** with a note. A fix session runs, then the review panel runs again.
+- **Stuck story:** **Retry**, **Take over** (attach and finish it yourself) or **Skip**.
+- **Stop:** **⏸ Pause** stops new sessions; **Cancel** ends the epic. A cancelled or failed epic can be restarted with **Run Software Factory on Epic**.
+
+### Use your own agents and reviewers
+
+Add agents to `.claude/agents/`. LexCode matches them to roles by name, or you can map them in `.lexcode/factory.json`. When creating the epic, pick any of them as reviewers. All of them must pass before a sprint merges.
+
+## Commands
+
+All commands are in the Command Palette under `LexCode:`. Most also appear as inline or right-click actions in the Board view.
+
+| Command | What it does |
+| --- | --- |
+| Add Project / Remove Project | Track or stop tracking a folder. When removing, you choose to keep or delete its board tasks; project files are never touched. |
+| Open Project in Workspace / Open All Projects in Workspace | Add project folders to the current workspace. |
+| Open Dashboard | Kanban view across all projects, with factory controls. |
+| Refresh | Redraw the Board view. |
+| New Epic | Create a factory epic, or a manual one. |
+| Run Software Factory on Epic | Start the factory on a manual, cancelled or failed epic. |
+| Open Factory Plan | Open the epic's `plan.md`. |
+| New Sprint / Start Sprint | Create a sprint / make it the active sprint. |
+| New Story / Edit Story / Set Status | Manage stories. |
+| Delete | Delete a story, sprint or epic. Deleting a sprint moves its stories to the backlog. |
+| Open Claude Session | Start a Claude Code session for the story. |
+| Resume Claude Session | Reopen a session linked to the story. |
+| Attach to Background Run | Open a terminal on the story's background run, for example to approve a permission. |
+| Import Tasks from TASKS.md / Sync from TASKS.md | See [Import](#import-tasks-from-tasksmd) and [Sync](#sync-from-tasksmd). |
+
 ## Settings
 
 | Setting | Default | Description |
@@ -166,6 +295,7 @@ Use **⏸ Pause** to stop new sessions from starting; running ones finish. Backg
 | `lexCode.backgroundPermissionMode` | `manual` | Permission mode for background runs: `manual`, `acceptEdits`, `plan`, `auto`, `bypassPermissions` (dangerous). |
 | `lexCode.tasksScanSkip` | `node_modules`, `.git`, `out`, `dist`, … | Folder names skipped when searching for `TASKS.md`. Empty list scans everything. |
 | `lexCode.claudePath` | _(auto)_ | Path to the `claude` CLI. |
+| `lexCode.tui.terminal` | `auto` | `lexcode tui` only: where Claude opens. `auto` (Neovim when inside it, else tmux, else inline), `tmux`, `nvim`, or `inline`. |
 | `lexCode.factory.autoStart` | `true` | New epics start the software factory. Off: **New Epic** only creates the epic. |
 | `lexCode.factory.builderPermissionMode` | `acceptEdits` | Builder mode preselected for new factory epics: `acceptEdits` or `auto` (Full auto). |
 | `lexCode.factory.targetBranch` | `main` | Default PR target branch. |

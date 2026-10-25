@@ -255,3 +255,21 @@ function agentFile(dir: string, file: string, fm: string) {
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, file), `---\n${fm}\n---\nbody`);
 }
+
+import { epicRefs, refArgs } from '../factory';
+
+test('epic reference files: listed in every prompt, readable via a leading --add-dir', () => {
+  const e = epic({ attachments: [{ id: 'a1', name: 'mock.png', file: 'a1-mock.png', mime: 'image/png' }] });
+  const refs = epicRefs(e, '/att/e1');
+  assert.deepEqual(refs, [path.join('/att/e1', 'a1-mock.png')]);
+  assert.match(stagePrompt('planning', e, { collaborators: [], refs }), /## Reference files from the human[\s\S]*- \/att\/e1\/a1-mock\.png/);
+  const sp = { id: 's', projectId: 'p1', name: 'S1', active: false, branch: 'b' };
+  const st = { id: 't', projectId: 'p1', title: 'T', status: 'todo' as const };
+  for (const p of [builderPrompt(e, sp, st, { collaborators: [], projectPath: '/p', refs }), reviewPrompt(e, sp, st, '', { collaborators: [], projectPath: '/p', refs }),
+    sprintReviewPrompt(e, sp, [st], '', 'reviewer', { collaborators: [], projectPath: '/p', refs })]) assert.match(p, /a1-mock\.png/);
+  assert.doesNotMatch(stagePrompt('planning', epic(), { collaborators: [] }), /Reference files/);
+  // --add-dir is variadic: it must come first, followed by an option, never right before the prompt.
+  const args = [...refArgs(e, '/att/e1'), ...stageArgs('planning', e, 'PROMPT', {})];
+  assert.deepEqual(args.slice(0, 3), ['--add-dir', '/att/e1', '--disallowedTools']);
+  assert.deepEqual(refArgs(epic(), '/att/e1'), []);
+});

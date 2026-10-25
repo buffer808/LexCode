@@ -1,40 +1,26 @@
-import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { EventEmitter } from 'events';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { randomUUID } from 'crypto';
 import { Project, Story, Store } from './store';
 import { listSessions, sessionExists } from './sessions';
+import { host } from './host';
 
-const EXT_ID = 'anthropic.claude-code';
-// claude-vscode.primaryEditor.open(sessionId?, prompt?) — same entry the extension's vscode://…/open URI uses.
-const EXT_OPEN = 'claude-vscode.primaryEditor.open';
-
-const useExtension = () =>
-  vscode.workspace.getConfiguration('lexCode').get('claudeLauncher') !== 'cli' && !!vscode.extensions.getExtension(EXT_ID);
-
-const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
-
-function terminal(project: Project, args: string) {
-  const t = vscode.window.createTerminal({ name: `Claude · ${project.name}`, cwd: project.path });
-  t.show();
-  t.sendText(`${shellQuote(claudeBin())} ${args}`);
-}
+const terminal = (project: Project, args: string[]) => host().terminal(`Claude · ${project.name}`, project.path, [claudeBin(), ...args]);
 
 export async function resumeSession(project: Project, sessionId: string) {
-  if (useExtension()) await vscode.commands.executeCommand(EXT_OPEN, sessionId);
-  else terminal(project, `--resume ${sessionId}`);
+  if (!await host().claudeEditor?.(sessionId)) terminal(project, ['--resume', sessionId]);
 }
 
 // Interactive session in a terminal at the project root, whatever folder the editor has open.
-export const terminalSession = (project: Project, prompt: string) => terminal(project, shellQuote(prompt));
+export const terminalSession = (project: Project, prompt: string) => terminal(project, [prompt]);
 
 // Opens an interactive session with `prompt`, no story link.
 export async function startSession(project: Project, prompt: string) {
-  if (useExtension()) await vscode.commands.executeCommand(EXT_OPEN, undefined, prompt);
-  else terminal(project, shellQuote(prompt));
+  if (!await host().claudeEditor?.(undefined, prompt)) terminal(project, [prompt]);
 }
 
 // attachDir: the story's attachments folder (Store.attachmentsDir(story.id)); it sits outside the project, hence --add-dir.
@@ -52,21 +38,34 @@ export async function openStorySession(project: Project, story: Story, attachDir
     await resumeSession(project, latest);
     return latest;
   }
-  if (!useExtension()) {
-    const id = randomUUID();
-    terminal(project, [...addDir(story, attachDir), '--session-id', id, storyPrompt(story, attachDir)].map(shellQuote).join(' '));
-    return id;
-  }
-  // Extension can't take a session id up front: watch the project's session dir for the new file.
+  // Claude Code extension can't take a session id up front: watch the project's session dir for the new file.
   // ponytail: assumes the extension runs in project.path (first/only workspace folder); else link is missed.
   const before = new Set(listSessions(project.path).map(s => s.id));
-  await vscode.commands.executeCommand(EXT_OPEN, undefined, storyPrompt(story, attachDir));
+  if (!await host().claudeEditor?.(undefined, storyPrompt(story, attachDir))) {
+    const id = randomUUID();
+    terminal(project, [...addDir(story, attachDir), '--session-id', id, storyPrompt(story, attachDir)]);
+    return id;
+  }
   for (let i = 0; i < 60; i++) {
     await new Promise(r => setTimeout(r, 2000));
     const fresh = listSessions(project.path).find(s => !before.has(s.id));
     if (fresh) return fresh.id;
   }
-  vscode.window.showWarningMessage(`Couldn't link Claude session to "${story.title}". Send the prompt, then retry.`);
+  host().message('warn', `Couldn't link Claude session to "${story.title}". Send the prompt, then retry.`);
+}
+
+// Opens the story's Claude session and links it; first session moves the story to doing.
+export async function claudeStory(store: Store, story: Story, forceNew = false) {
+  const project = store.all().projects.find(p => p.id === story.projectId);
+  if (!project) return;
+  const sessionId = await openStorySession(project, story, store.attachmentsDir(story.id), forceNew);
+  if (!sessionId) return;
+  // Re-read: the extension path polls for up to 2 min while the story may have changed.
+  store.reload();
+  const cur = store.all().stories.find(s => s.id === story.id);
+  if (cur) store.update('stories', cur.id, {
+    sessionIds: [...new Set([...(cur.sessionIds ?? []), sessionId])],
+    status: cur.status === 'todo' ? 'doing' : cur.status });
 }
 
 /* ---------- background runs (claude --bg) ---------- */
@@ -82,7 +81,7 @@ export const PERMISSION_MODES: Record<string, string> = {
 
 // GUI-launched IDEs often lack the shell PATH, so look in the usual install spots too.
 function claudeBin(): string {
-  const set = vscode.workspace.getConfiguration('lexCode').get<string>('claudePath');
+  const set = host().setting('claudePath', '');
   if (set) return set;
   const dirs = [...(process.env.PATH ?? '').split(path.delimiter), path.join(os.homedir(), '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin'];
   return dirs.map(d => path.join(d, 'claude')).find(f => fs.existsSync(f)) ?? 'claude';
@@ -108,8 +107,8 @@ export async function launchBackground(project: Project, args: string[], cwd = p
     const err = String(e?.stderr || e?.message || e).trim();
     if (/not trusted/i.test(err)) {
       // --bg refuses untrusted folders; trusting is the user's call, so open claude there to show the prompt.
-      const c = await vscode.window.showErrorMessage(`Claude doesn't trust ${cwd} yet. Accept the trust prompt once, then run again.`, 'Trust folder…');
-      if (c) terminal({ ...project, path: cwd }, '');
+      const c = await host().message('error', `Claude doesn't trust ${cwd} yet. Accept the trust prompt once, then run again.`, undefined, 'Trust folder…');
+      if (c) terminal({ ...project, path: cwd }, []);
       return undefined;
     }
     throw new Error(err);
@@ -149,15 +148,16 @@ export function liveRun(s: Story, agents: Record<string, Agent>): Agent | undefi
 }
 
 export function attach(project: Project, agentId: string) {
-  terminal(project, `attach ${agentId}`);
+  terminal(project, ['attach', agentId]);
 }
 
 // Polls background agents linked to stories and factory epics; notifies on state changes (blocked = needs approval).
 // ponytail: spawns `claude agents` every 5s while anything is linked; switch to a file watch if the CLI exposes one.
-export class AgentWatcher implements vscode.Disposable {
+export class AgentWatcher {
   agents: Record<string, Agent> = {};
-  private changed = new vscode.EventEmitter<void>();
-  readonly onDidChange = this.changed.event;
+  private changed = new EventEmitter();
+  // Returns the unsubscribe, VS Code Disposable-style.
+  onDidChange(fn: () => void) { this.changed.on('change', fn); return { dispose: () => { this.changed.off('change', fn); } }; }
   private timer = setInterval(() => this.poll(), 5000);
   private busy = false;
 
@@ -187,18 +187,18 @@ export class AgentWatcher implements vscode.Disposable {
         const project = b.projects.find(p => p.id === t.projectId);
         if (!prev || !project) continue; // first sighting: no alert
         if (a.state === 'blocked') {
-          vscode.window.showWarningMessage(`Claude needs your approval: "${t.title}"`, 'Attach')
+          host().message('warn', `Claude needs your approval: "${t.title}"`, undefined, 'Attach')
             .then(c => c && attach(project, a.id));
         } else if (!t.quiet) {
-          vscode.window.showInformationMessage(`Background run "${t.title}" is now ${a.state}`, 'Attach')
+          host().message('info', `Background run "${t.title}" is now ${a.state}`, undefined, 'Attach')
             .then(c => c && attach(project, a.id));
         }
       }
       this.agents = next;
-      if (dirty) this.changed.fire();
+      if (dirty) this.changed.emit('change');
     } catch { /* CLI missing or busy: try next tick */ }
     finally { this.busy = false; }
   }
 
-  dispose() { clearInterval(this.timer); this.changed.dispose(); }
+  dispose() { clearInterval(this.timer); this.changed.removeAllListeners(); }
 }

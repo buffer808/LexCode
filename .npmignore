@@ -1,0 +1,7 @@
+*.vsix
+.tmp/
+.lexcode/
+src/
+out/test/
+**/*.map
+docs/

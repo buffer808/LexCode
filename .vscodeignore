@@ -5,3 +5,8 @@ out/test/**
 **/*.map
 tsconfig.json
 skills/**
+out/server.js
+media/web.*
+media/term.*
+media/index.html
+.npmignore

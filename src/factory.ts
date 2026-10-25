@@ -43,11 +43,18 @@ const PLAN_SCHEMA = `{
 }`;
 
 export interface StageContext {
+  refs?: string[];           // absolute paths of the epic's reference files (epicRefs)
   plan?: Plan;               // current plan (revalidate/security, or planning after "request changes")
   feedback?: string;         // human feedback from the plan gate
   roleBody?: string;         // bundled role prompt when no project agent is mapped
   collaborators: AgentDef[]; // every discovered agent, offered for delegation
 }
+
+// Epic attachments (screenshots, mockups) for every factory session. The folder sits outside the project: pass `args` too.
+export const epicRefs = (e: Epic, attachDir: string) => (e.attachments ?? []).map(a => path.join(attachDir, a.file));
+const refList = (refs?: string[]) => refs?.length ? `## Reference files from the human\nScreenshots, mockups or docs of what this epic should achieve. Open each one (Read tool) before you start:\n${refs.map(r => `- ${r}`).join('\n')}` : '';
+// Goes first: --add-dir is variadic, so the option after it must not be the prompt.
+export const refArgs = (e: Epic, attachDir: string) => e.attachments?.length ? ['--add-dir', attachDir] : [];
 
 export function stagePrompt(stage: EpicStage, epic: Epic, ctx: StageContext): string {
   const task: Record<string, string> = {
@@ -58,7 +65,7 @@ export function stagePrompt(stage: EpicStage, epic: Epic, ctx: StageContext): st
   const others = ctx.collaborators.filter(a => a.name !== epic.roleAgents?.[STAGE_ROLE[stage]!]);
   return [
     ctx.roleBody,
-    `# Epic: ${epic.title}`, epic.description,
+    `# Epic: ${epic.title}`, epic.description, refList(ctx.refs),
     `## Task\n${task[stage]}`,
     ctx.plan && `## Current plan\n\`\`\`json\n${JSON.stringify(ctx.plan, null, 2)}\n\`\`\``,
     ctx.feedback && `## Human feedback\n${ctx.feedback}`,
@@ -253,7 +260,7 @@ const collaboratorList = (agents: AgentDef[], self?: string) => {
 };
 export const commitMessage = (s: Story) => `story(${s.id.slice(0, 8)}): ${s.title}`;
 
-export interface BuildContext { roleBody?: string; collaborators: AgentDef[]; projectPath: string }
+export interface BuildContext { roleBody?: string; collaborators: AgentDef[]; projectPath: string; refs?: string[] }
 
 export function builderPrompt(e: Epic, sp: Sprint, s: Story, ctx: BuildContext): string {
   // .lexcode/ is git-excluded, so it isn't in the worktree: the plan file stays out of the builder's reading list.
@@ -262,7 +269,7 @@ export function builderPrompt(e: Epic, sp: Sprint, s: Story, ctx: BuildContext):
     ctx.roleBody,
     `# Story: ${s.title}`, s.description,
     refs.length && `Related files (read them first):\n${refs.map(r => `- ${r}`).join('\n')}`,
-    `## Context\nEpic: ${e.title}${e.description ? `\n${e.description}` : ''}\nSprint: ${sp.name}`,
+    `## Context\nEpic: ${e.title}${e.description ? `\n${e.description}` : ''}\nSprint: ${sp.name}`, refList(ctx.refs),
     collaboratorList(ctx.collaborators, e.roleAgents?.builder),
     `## Rules\nYou work unattended. Your current directory already is a git worktree on branch \`${sp.branch}\`: work here, do not create or enter other worktrees. Do not switch branches, push, merge or rebase. ` +
     `Implement only this story, add or update tests, run the tests, then commit all your changes with the message \`${commitMessage(s)}\`. ` +
@@ -280,7 +287,7 @@ const verdictRules = `## Output\nYou are running unattended in read-only plan mo
 
 export function reviewPrompt(e: Epic, sp: Sprint, s: Story, diff: string, ctx: BuildContext): string {
   return [ctx.roleBody, `# Review story: ${s.title}`, s.description,
-    `Epic: ${e.title} · Sprint: ${sp.name} · Branch: \`${sp.branch}\``,
+    `Epic: ${e.title} · Sprint: ${sp.name} · Branch: \`${sp.branch}\``, refList(ctx.refs),
     `## Diff (${s.baseCommit?.slice(0, 8)}...HEAD)\n\`\`\`diff\n${clip(diff, s.baseCommit ?? '')}\n\`\`\``,
     collaboratorList(ctx.collaborators, e.roleAgents?.reviewer), verdictRules].filter(Boolean).join('\n\n');
 }
@@ -303,7 +310,7 @@ export const reviewLabel = (r: SprintReview) => r.agent ?? `LexCode ${r.lens}`;
 
 export function sprintReviewPrompt(e: Epic, sp: Sprint, stories: Story[], diff: string, lens: Lens, ctx: BuildContext & { self?: string }): string {
   return [ctx.roleBody, `# ${LENS_LABEL[lens]} sprint: ${sp.name}`,
-    `Epic: ${e.title}${e.description ? `\n${e.description}` : ''}`,
+    `Epic: ${e.title}${e.description ? `\n${e.description}` : ''}`, refList(ctx.refs),
     `You are one of several reviewers of this sprint before it merges into \`${e.branch}\`. ${LENS_TASK[lens]}`,
     `## Stories\n${stories.map(s => `- ${s.title}`).join('\n')}`,
     `## Diff (${e.branch}...${sp.branch})\n\`\`\`diff\n${clip(diff, e.branch ?? '')}\n\`\`\``,

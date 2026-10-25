@@ -1,16 +1,16 @@
-import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { Epic, EpicStage, ModelChoice, ModelRole, PrVia, Project, Role, Sprint, SprintReview, Story, Store } from './store';
 import { AgentWatcher, launchBackground, terminalSession } from './claude';
+import { host } from './host';
 import { finalMessage } from './sessions';
 import { discoverAgents, bundledRolePrompt, resolveRoles, worktreeArgs } from './agents';
 import * as git from './git';
 import {
   Action, EpicInput, NEXT_STAGE, PLANNING, STAGE_LABEL, STAGE_ROLE, applyPlan, builderPrompt, conflictIssue, criticalReasons,
-  epicBranch, finished, fixPrompt, mergeVerdicts, nextActions, parseStageOutput, parseVerdict, planFile, readPlan, reviewLabel, reviewPanel, reviewPrompt, sessionArgs,
-  sprintBranch, sprintFixPrompt, sprintReviewPrompt, stageArgs, stagePrompt, storiesOf, tryLock, worktreeDir, writePlan,
+  epicBranch, epicRefs, finished, fixPrompt, mergeVerdicts, nextActions, parseStageOutput, parseVerdict, planFile, readPlan, reviewLabel, reviewPanel, reviewPrompt, sessionArgs,
+  refArgs, sprintBranch, sprintFixPrompt, sprintReviewPrompt, stageArgs, stagePrompt, storiesOf, tryLock, worktreeDir, writePlan,
 } from './factory';
 
 export type Decision =
@@ -25,12 +25,12 @@ export type Decision =
 
 // Drives factory epics: plan → revalidate → security → plan gate → build/review loop → merges → PR gate.
 // State lives on the epic/sprints/stories in board.json, so a reload picks up where it left off.
-export class FactoryRunner implements vscode.Disposable {
+export class FactoryRunner {
   private owner = `${process.pid}-${randomUUID()}`; // this window, for the per-epic driver lock
   private launching = new Set<string>();             // epic/sprint/story ids with work in flight
   private ticking = false;
   private timer = setInterval(() => this.tick(), 15000); // also the lock heartbeat
-  private sub: vscode.Disposable;
+  private sub: { dispose(): void };
 
   constructor(private store: Store, private agents: AgentWatcher, private lockDir: string, private bundled: string,
               private refresh: () => void) {
@@ -38,8 +38,8 @@ export class FactoryRunner implements vscode.Disposable {
     this.tick();
   }
 
-  private settings = () => vscode.workspace.getConfiguration('lexCode.factory');
-  private models = () => this.settings().get<Partial<Record<ModelRole, ModelChoice>>>('models', {});
+  private setting = <T>(key: string, fallback: T) => host().setting(`factory.${key}`, fallback);
+  private models = () => this.setting<Partial<Record<ModelRole, ModelChoice>>>('models', {});
   private project = (e: Epic) => this.store.all().projects.find(p => p.id === e.projectId);
   private epic = (id: string) => { this.store.reload(); return this.store.all().epics.find(e => e.id === id); };
   private lock = (e: Epic) => tryLock(path.join(this.lockDir, `${e.id}.lock`), this.owner);
@@ -50,7 +50,7 @@ export class FactoryRunner implements vscode.Disposable {
     try { await git.currentBranch(project.path); } catch {
       throw new Error(`${project.name} is not a git repository; the factory needs git for epic branches and PRs.`);
     }
-    const targetBranch = input.targetBranch ?? this.settings().get('targetBranch', 'main');
+    const targetBranch = input.targetBranch ?? this.setting('targetBranch', 'main');
     let baseBranch: string;
     try { baseBranch = await git.resolveBase(project.path, targetBranch); }
     catch (e: any) { throw new Error(`Can't cut the epic branch: ${e.message}. Pick an existing PR target branch.`); }
@@ -76,6 +76,8 @@ export class FactoryRunner implements vscode.Disposable {
     return wt;
   }
   private stageExtra = (project: Project, cwd: string) => cwd === project.path ? [] : worktreeArgs(project.path, cwd);
+  private attachDir = (epic: Epic) => this.store.attachmentsDir(epic.id);
+  private refs = (epic: Epic) => epicRefs(epic, this.attachDir(epic));
 
   detectedRoles = (project: Project) => resolveRoles(project.path);
 
@@ -89,16 +91,16 @@ export class FactoryRunner implements vscode.Disposable {
       const agent = defs.find(a => a.name === epic.roleAgents?.[role]); // renamed/deleted since creation → bundled prompt
       const plan = stage === 'planning' && !epic.feedback ? undefined : readPlan(project.path, epic.id);
       if (stage !== 'planning' && !plan) throw new Error('plan.json is missing; re-run planning');
-      const prompt = stagePrompt(stage, epic, { plan, feedback: epic.feedback, collaborators: defs,
+      const prompt = stagePrompt(stage, epic, { plan, feedback: epic.feedback, collaborators: defs, refs: this.refs(epic),
         roleBody: agent ? undefined : bundledRolePrompt(this.bundled, role) });
       this.store.update('epics', epic.id, { stage, stageSessionId: undefined, stageStartedAt: Date.now(), stageAttempts: 0, error: undefined, pending: undefined });
       const cwd = await this.epicCwd(project, epic);
-      const sid = await launchBackground(project, stageArgs(stage, epic, prompt, this.models(), agent, undefined, this.stageExtra(project, cwd)), cwd);
+      const sid = await launchBackground(project, [...refArgs(epic, this.attachDir(epic)), ...stageArgs(stage, epic, prompt, this.models(), agent, undefined, this.stageExtra(project, cwd))], cwd);
       this.store.update('epics', epic.id, sid ? { stageSessionId: sid } : { error: `Claude doesn't trust ${cwd} yet; accept the trust prompt, then Retry.` });
       this.agents.poll();
     } catch (e: any) {
       this.store.update('epics', epic.id, { error: `${STAGE_LABEL[stage]}: ${e.message}` });
-      vscode.window.showErrorMessage(`LexCode factory · ${epic.title}: ${e.message}`);
+      host().message('error', `LexCode factory · ${epic.title}: ${e.message}`);
     } finally {
       this.launching.delete(epic.id);
       this.refresh();
@@ -135,8 +137,8 @@ export class FactoryRunner implements vscode.Disposable {
     catch (e: any) {
       if ((epic.stageAttempts ?? 0) >= 1) {
         this.store.update('epics', epic.id, { error: `${STAGE_LABEL[stage]} returned an invalid plan: ${e.message}` });
-        vscode.window.showErrorMessage(`LexCode factory · ${epic.title}: ${STAGE_LABEL[stage]} failed (${e.message}).`, 'Retry')
-          .then(c => c && this.decide(epic.id, { decision: 'retry' }));
+        host().message('error', `LexCode factory · ${epic.title}: ${STAGE_LABEL[stage]} failed (${e.message}).`, undefined, 'Retry')
+          .then(c => { if (c) this.decide(epic.id, { decision: 'retry' }); });
         return this.refresh();
       }
       // One correction round in the same session, then give up and let the human retry.
@@ -145,7 +147,7 @@ export class FactoryRunner implements vscode.Disposable {
         const agent = discoverAgents(project.path).find(a => a.name === epic.roleAgents?.[STAGE_ROLE[stage]!]);
         const fix = `Your last reply could not be used: ${e.message}. Reply again with the complete plan as exactly one \`\`\`json block in the required shape.`;
         this.store.update('epics', epic.id, { stageAttempts: 1, stageStartedAt: Date.now() });
-        const sid = await launchBackground(project, stageArgs(stage, epic, fix, this.models(), agent, epic.stageSessionId, this.stageExtra(project, cwd)), cwd);
+        const sid = await launchBackground(project, [...refArgs(epic, this.attachDir(epic)), ...stageArgs(stage, epic, fix, this.models(), agent, epic.stageSessionId, this.stageExtra(project, cwd))], cwd);
         this.store.update('epics', epic.id, sid ? { stageSessionId: sid } : { error: `Claude doesn't trust ${cwd}` });
         this.agents.poll();
       } catch (err: any) {
@@ -163,28 +165,29 @@ export class FactoryRunner implements vscode.Disposable {
     const stories = plan.sprints.reduce((n, s) => n + s.stories.length, 0);
     const risky = plan.security.filter(f => f.severity !== 'low').length;
     // Not awaited: the toast can sit for hours and must not hold up tick().
-    vscode.window.showInformationMessage(
+    host().message('info',
       `Plan ready for "${epic.title}": ${plan.sprints.length} sprints, ${stories} stories${risky ? `, ${risky} medium/high security findings` : ''}.`,
-      'View plan', 'Approve', 'Request changes', 'Reject').then(c => this.gateChoice(epic, c));
+      undefined, 'View plan', 'Approve', 'Request changes', 'Reject').then(c => this.gateChoice(epic, c));
   }
 
   private async gateChoice(epic: Epic, c?: string) {
     if (c === 'View plan') this.openPlan(epic.id);
     else if (c === 'Approve') await this.decide(epic.id, { decision: 'approve' });
     else if (c === 'Request changes') {
-      const text = await vscode.window.showInputBox({ prompt: `What should change in the plan for "${epic.title}"?`, ignoreFocusOut: true });
+      const text = await host().input(`What should change in the plan for "${epic.title}"?`);
       if (text) await this.decide(epic.id, { decision: 'changes', text });
     } else if (c === 'Reject') await this.decide(epic.id, { decision: 'reject' });
   }
 
-  // Rendered preview, or the markdown source in an editor.
+  // Rendered preview, or the markdown source (in an editor, or the dashboard's viewer in the browser).
   openPlan(epicId: string, source = false) {
     const epic = this.epic(epicId), project = epic && this.project(epic);
     if (!project) return;
     const file = planFile(project.path, epicId, 'md');
-    if (!fs.existsSync(file)) return vscode.window.showInformationMessage(`"${epic!.title}" has no factory plan yet.`);
-    const uri = vscode.Uri.file(file);
-    return source ? vscode.window.showTextDocument(uri) : vscode.commands.executeCommand('markdown.showPreview', uri);
+    if (!fs.existsSync(file)) return host().message('info', `"${epic!.title}" has no factory plan yet.`);
+    const h = host();
+    if (h.showMarkdown) h.showMarkdown(`Plan: ${epic!.title}`, fs.readFileSync(file, 'utf8'), source);
+    else h.openFile(file, source ? { line: 1 } : { preview: true });
   }
 
   // Project-relative plan.md path per epic that has one (dashboard links).
@@ -206,9 +209,9 @@ export class FactoryRunner implements vscode.Disposable {
         case 'approve': {
           if (!atGate) break;
           const plan = readPlan(project.path, epic.id);
-          if (!plan) { vscode.window.showErrorMessage(`Plan for "${epic.title}" is missing or invalid; request changes to re-plan.`); break; }
+          if (!plan) { host().message('error', `Plan for "${epic.title}" is missing or invalid; request changes to re-plan.`); break; }
           applyPlan(this.store, project, epic, plan);
-          vscode.window.showInformationMessage(`"${epic.title}": ${plan.sprints.length} sprints added to the board. Set the number of builders and start.`);
+          host().message('info', `"${epic.title}": ${plan.sprints.length} sprints added to the board. Set the number of builders and start.`);
           break;
         }
         case 'changes':
@@ -261,7 +264,7 @@ export class FactoryRunner implements vscode.Disposable {
         case 'prOpened': if (epic.stage === 'awaitingPrApproval') await this.prOpened(epic, project, d.url); break;
       }
     } catch (e: any) {
-      vscode.window.showErrorMessage(`LexCode factory · ${epic.title}: ${e.message}`);
+      host().message('error', `LexCode factory · ${epic.title}: ${e.message}`);
     }
     this.refresh();
     this.tick();
@@ -270,7 +273,7 @@ export class FactoryRunner implements vscode.Disposable {
   /* ---------- build loop ---------- */
 
   private storyById = (id: string) => { this.store.reload(); return this.store.all().stories.find(s => s.id === id); };
-  private maxAttempts = () => Math.max(1, this.settings().get('maxReviewAttempts', 3));
+  private maxAttempts = () => Math.max(1, this.setting('maxReviewAttempts', 3));
   // name: a specific agent (review panel); otherwise the epic's agent for `role`. No agent → bundled prompt for `bundled`.
   private agentFor(project: Project, epic: Epic, role: Role, name = epic.roleAgents?.[role], bundled: Role = role) {
     const defs = discoverAgents(project.path);
@@ -278,8 +281,8 @@ export class FactoryRunner implements vscode.Disposable {
     return { defs, agent, roleBody: agent ? undefined : bundledRolePrompt(this.bundled, bundled) };
   }
   private needsHuman(epic: Epic, what: string) {
-    vscode.window.showWarningMessage(`LexCode factory · ${epic.title}: ${what}`, 'Open dashboard')
-      .then(c => c && vscode.commands.executeCommand('lexCode.dashboard'));
+    host().message('warn', `LexCode factory · ${epic.title}: ${what}`, undefined, ...dashboardAction())
+      .then(c => c && host().showDashboard?.());
   }
 
   // Ready → building: cut the epic branch from the base and check it out in its own worktree (merges happen there).
@@ -309,8 +312,8 @@ export class FactoryRunner implements vscode.Disposable {
         case 'sprintVerdict': await this.sprintVerdict(epic, project, a.sprint); break;
         case 'finish':
           this.store.update('epics', epic.id, { stage: 'awaitingPrApproval', pending: { kind: 'pr' } });
-          vscode.window.showInformationMessage(`"${epic.title}": every sprint is merged into ${epic.branch}. Create the PR?`, 'Create PR', 'Open dashboard')
-            .then(c => c === 'Create PR' ? this.decide(epic.id, { decision: 'createPr' }) : c && vscode.commands.executeCommand('lexCode.dashboard'));
+          host().message('info', `"${epic.title}": every sprint is merged into ${epic.branch}. Create the PR?`, undefined, 'Create PR', ...dashboardAction())
+            .then(c => c === 'Create PR' ? this.decide(epic.id, { decision: 'createPr' }) : c && host().showDashboard?.());
           break;
       }
     } catch (e: any) {
@@ -326,8 +329,8 @@ export class FactoryRunner implements vscode.Disposable {
   }
 
   // Launches a session in the sprint worktree; returns its id or throws (untrusted folder included).
-  private async launchIn(project: Project, sp: Sprint, args: string[]) {
-    const sid = await launchBackground(project, args, sp.worktree);
+  private async launchIn(epic: Epic, project: Project, sp: Sprint, args: string[]) {
+    const sid = await launchBackground(project, [...refArgs(epic, this.attachDir(epic)), ...args], sp.worktree);
     if (!sid) throw new Error(`Claude doesn't trust ${sp.worktree}; accept the trust prompt there, then Retry.`);
     this.agents.poll();
     return sid;
@@ -335,10 +338,10 @@ export class FactoryRunner implements vscode.Disposable {
 
   private async build(epic: Epic, project: Project, sp: Sprint, story: Story) {
     const { defs, agent, roleBody } = this.agentFor(project, epic, 'builder');
-    const prompt = builderPrompt(epic, sp, story, { roleBody, collaborators: defs, projectPath: project.path });
+    const prompt = builderPrompt(epic, sp, story, { roleBody, collaborators: defs, projectPath: project.path, refs: this.refs(epic) });
     this.store.update('stories', story.id, { status: 'doing', baseCommit: await git.headCommit(sp.worktree!), runStartedAt: Date.now(),
       builderSessionId: undefined, reviewerSessionId: undefined, fixups: 0 });
-    const sid = await this.launchIn(project, sp, sessionArgs(epic, 'builder', prompt, this.models(), {
+    const sid = await this.launchIn(epic, project, sp, sessionArgs(epic, 'builder', prompt, this.models(), {
       mode: epic.builderMode ?? 'acceptEdits', agent, extra: worktreeArgs(project.path, sp.worktree!), name: `LexCode · ${story.title} · build` }));
     this.store.update('stories', story.id, { builderSessionId: sid });
   }
@@ -346,7 +349,7 @@ export class FactoryRunner implements vscode.Disposable {
   private async resumeBuilder(epic: Epic, project: Project, sp: Sprint, story: Story, issues: string[]) {
     const { agent } = this.agentFor(project, epic, 'builder');
     this.store.update('stories', story.id, { status: 'doing', runStartedAt: Date.now(), reviewerSessionId: undefined });
-    const sid = await this.launchIn(project, sp, sessionArgs(epic, 'builder', fixPrompt(story, issues), this.models(), {
+    const sid = await this.launchIn(epic, project, sp, sessionArgs(epic, 'builder', fixPrompt(story, issues), this.models(), {
       mode: epic.builderMode ?? 'acceptEdits', agent, extra: worktreeArgs(project.path, sp.worktree!), resumeId: story.builderSessionId }));
     this.store.update('stories', story.id, { builderSessionId: sid });
   }
@@ -369,7 +372,7 @@ export class FactoryRunner implements vscode.Disposable {
     const diff = await git.diff(sp.worktree!, story.baseCommit!, 'HEAD');
     const { defs, agent, roleBody } = this.agentFor(project, epic, 'reviewer');
     this.store.update('stories', story.id, { status: 'review', runStartedAt: Date.now(), reviewerSessionId: undefined, fixups: 0 });
-    const sid = await this.launchIn(project, sp, sessionArgs(epic, 'reviewer', reviewPrompt(epic, sp, story, diff, { roleBody, collaborators: defs, projectPath: project.path }),
+    const sid = await this.launchIn(epic, project, sp, sessionArgs(epic, 'reviewer', reviewPrompt(epic, sp, story, diff, { roleBody, collaborators: defs, projectPath: project.path, refs: this.refs(epic) }),
       this.models(), { mode: 'plan', agent, extra: worktreeArgs(project.path, sp.worktree!), name: `LexCode · ${story.title} · review` }));
     this.store.update('stories', story.id, { reviewerSessionId: sid });
   }
@@ -377,7 +380,7 @@ export class FactoryRunner implements vscode.Disposable {
   // Unusable reviewer output: resume the same session once asking for the verdict again (the caller blocks after that).
   private reprompt(project: Project, sp: Sprint, epic: Epic, role: Role, name: string | undefined, sid: string, err: string) {
     const { agent } = this.agentFor(project, epic, role, name);
-    return this.launchIn(project, sp, sessionArgs(epic, role,
+    return this.launchIn(epic, project, sp, sessionArgs(epic, role,
       `Your last reply could not be used: ${err}. Reply again with your verdict as exactly one \`\`\`json block in the required shape.`,
       this.models(), { mode: 'plan', agent, extra: worktreeArgs(project.path, sp.worktree!), resumeId: sid }));
   }
@@ -408,8 +411,8 @@ export class FactoryRunner implements vscode.Disposable {
       // Mapped project agent runs as itself; otherwise the bundled reviewer prompt with this lens's focus.
       const { defs, agent, roleBody } = this.agentFor(project, epic, r.lens, r.agent, 'reviewer');
       r.startedAt = Date.now();
-      r.sessionId = await this.launchIn(project, sp, sessionArgs(epic, r.lens,
-        sprintReviewPrompt(epic, sp, stories, diff, r.lens, { roleBody, collaborators: defs, projectPath: project.path, self: r.agent }),
+      r.sessionId = await this.launchIn(epic, project, sp, sessionArgs(epic, r.lens,
+        sprintReviewPrompt(epic, sp, stories, diff, r.lens, { roleBody, collaborators: defs, projectPath: project.path, refs: this.refs(epic), self: r.agent }),
         this.models(), { mode: 'plan', agent, extra: worktreeArgs(project.path, sp.worktree!), name: `LexCode · ${sp.name} · ${reviewLabel(r)}` }));
       this.store.update('sprints', sp.id, { reviews });
     }
@@ -445,7 +448,7 @@ export class FactoryRunner implements vscode.Disposable {
       return this.fixSprint(epic, project, sp, v.issues);
     }
     const changed = await git.changedFiles(sp.worktree!, epic.branch!, sp.branch!);
-    const reasons = criticalReasons(sp, reviews, changed, this.settings().get<string[]>('sensitivePaths', []), readPlan(project.path, epic.id));
+    const reasons = criticalReasons(sp, reviews, changed, this.setting<string[]>('sensitivePaths', []), readPlan(project.path, epic.id));
     if (reasons.length) {
       this.store.update('sprints', sp.id, { state: 'awaitingMerge', critical: reasons });
       return this.needsHuman(epic, `${sp.name} is reviewed; merging needs your approval (${reasons[0]}).`);
@@ -456,7 +459,7 @@ export class FactoryRunner implements vscode.Disposable {
   private async fixSprint(epic: Epic, project: Project, sp: Sprint, issues: string[]) {
     const { agent } = this.agentFor(project, epic, 'builder');
     this.store.update('sprints', sp.id, { state: 'fixing', runStartedAt: Date.now(), sessionId: undefined, critical: undefined, reviews: undefined });
-    const sid = await this.launchIn(project, sp, sessionArgs(epic, 'builder', sprintFixPrompt(epic, sp, issues), this.models(), {
+    const sid = await this.launchIn(epic, project, sp, sessionArgs(epic, 'builder', sprintFixPrompt(epic, sp, issues), this.models(), {
       mode: epic.builderMode ?? 'acceptEdits', agent, extra: worktreeArgs(project.path, sp.worktree!), name: `LexCode · ${sp.name} · fix` }));
     this.store.update('sprints', sp.id, { sessionId: sid });
   }
@@ -511,10 +514,11 @@ export class FactoryRunner implements vscode.Disposable {
     for (const sp of this.store.all().sprints.filter(s => s.epicId === epic.id && s.state === 'merged')) await this.dropBranch(epic, project, sp);
     await git.removeWorktree(project.path, worktreeDir(project.path, epic.id));
     this.store.update('epics', epic.id, { stage: 'done', pending: undefined, prUrl: url });
-    vscode.window.showInformationMessage(`PR opened for "${epic.title}"`, 'Open PR').then(c => c && vscode.env.openExternal(vscode.Uri.parse(url)));
+    host().message('info', `PR opened for "${epic.title}"`, undefined, 'Open PR').then(c => c && host().openExternal(url));
   }
 
   dispose() { clearInterval(this.timer); this.sub.dispose(); }
 }
 
+const dashboardAction = () => host().showDashboard ? ['Open dashboard'] : [];
 const workerCount = (n: unknown) => Math.min(8, Math.max(1, Math.floor(Number(n)) || 1));

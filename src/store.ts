@@ -32,6 +32,7 @@ export interface Epic {
   feedback?: string; // human "request changes" text for the next planning run
   pending?: Gate;
   prUrl?: string; error?: string;
+  attachments?: Attachment[]; // reference files (screenshots, mockups) handed to every factory session
 }
 export interface Sprint {
   id: string; projectId: string; name: string; start?: string; end?: string; active: boolean;
@@ -112,10 +113,10 @@ export class Store {
     return r;
   }
 
-  // Attachment files live beside board.json: attachments/<storyId>/<file>.
-  attachmentsDir(storyId?: string) {
+  // Attachment files live beside board.json: attachments/<storyId or epicId>/<file>.
+  attachmentsDir(ownerId?: string) {
     const root = path.join(path.dirname(this.file), 'attachments');
-    return storyId ? path.join(root, storyId) : root;
+    return ownerId ? path.join(root, ownerId) : root;
   }
 
   // Tasks kept when a project is removed: archive/<hash of path>.json, restored when that path is re-added.
@@ -165,7 +166,7 @@ export class Store {
         fs.mkdirSync(path.dirname(file), { recursive: true });
         fs.writeFileSync(file, JSON.stringify({ epics: own(b.epics), sprints: own(b.sprints), stories: own(b.stories) }, null, 2));
       }
-      const gone = c === 'stories' ? [id] : project && !keepTasks ? b.stories.filter(s => s.projectId === id).map(s => s.id) : [];
+      const gone = c === 'stories' || c === 'epics' ? [id] : project && !keepTasks ? [...b.stories, ...b.epics].filter(s => s.projectId === id).map(s => s.id) : [];
       for (const s of gone) fs.rmSync(this.attachmentsDir(s), { recursive: true, force: true });
       (b[c] as { id: string }[]) = (b[c] as { id: string }[]).filter(x => x.id !== id);
       if (c === 'projects') {
