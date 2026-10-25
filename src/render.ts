@@ -38,12 +38,15 @@ export function line(segs: Seg[], w: number) {
   return r + ' '.repeat(w - used);
 }
 
-// Rounded box w columns wide around rows of segments; footer sits on the bottom border.
-export function box(rows: Seg[][], w: number, color = DIM, footer = '') {
+// Rounded box w columns wide around rows of segments (or ready-styled strings exactly w - 4 wide);
+// title sits on the top border, footer on the bottom one.
+export function box(rows: (Seg[] | string)[], w: number, color = DIM, footer = '', title: Seg[] = []) {
   const inner = Math.max(1, w - 4), side = sgr(color, '│');
   const bottom = footer ? `─ ${footer} ` : '';
-  return [sgr(color, `╭${'─'.repeat(w - 2)}╮`),
-    ...rows.map(r => `${side} ${line(r, inner)} ${side}`),
+  const tw = Math.min(width(title.map(t => t[0]).join('')), Math.max(0, w - 6));
+  const top = tw ? sgr(color, '╭─ ') + line(title, tw) + sgr(color, ` ${'─'.repeat(Math.max(0, w - 5 - tw))}╮`) : sgr(color, `╭${'─'.repeat(w - 2)}╮`);
+  return [top,
+    ...rows.map(r => `${side} ${typeof r === 'string' ? r : line(r, inner)} ${side}`),
     sgr(color, `╰${bottom}${'─'.repeat(Math.max(0, w - 2 - width(bottom)))}╯`)];
 }
 

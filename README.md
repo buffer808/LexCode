@@ -82,13 +82,9 @@ lexcode          # same as `lexcode tui`
 - **Questions** show as numbered choices in a box (`↑`/`↓` and `⏎`, or the number; `esc` for later).
 - **`/epic`** asks the dashboard form's questions in turn: title, how builders run, description, target branch, models, reference files (comma-separated paths, at most 20 files of 25 MB). Nothing is created until you confirm; `esc` cancels.
 - **`/next`** jumps to the next thing waiting on you, in any project: a plan or PR gate, a merge to approve, a blocked sprint or story, or a session asking for permission.
-- **Where Claude opens** (until the planned in-window modal replaces it):
-  - Inside **Neovim**'s `:terminal` (run `:terminal lexcode`): a vertical split in that Neovim.
-  - Inside **tmux**: a pane split off on the right.
-  - Plain terminal with tmux installed: `lexcode` starts (or reattaches to) a tmux session named `lexcode` and works as above.
-  - Otherwise Claude takes over the terminal and LexCode comes back when it exits.
-  - Force one with `"lexCode.tui.terminal": "tmux" | "nvim" | "inline"` in `~/.lexcode/settings.json`.
-  - One Claude pane at a time: attaching another task parks the current pane, which keeps running (`⏸ parked`), and attaching it again swaps it back in.
+- **Where Claude opens:** in a box over the list, inside LexCode's own screen (it runs `claude` in an embedded terminal). Everything you type goes to Claude; `ctrl+]` closes the box and the session keeps running (`⏸ parked`), and opening the task again brings it back. Quitting LexCode stops sessions running inside it (after asking); their transcripts stay, so attaching resumes them.
+  - **`/split`** puts Claude beside the list instead (terminal 120+ columns wide). `ctrl+]` switches the keyboard between list and Claude, `⏎` on another task shows that one in the pane, `ctrl+\` closes the split.
+  - Older pane modes are still there with `"lexCode.tui.terminal"` in `~/.lexcode/settings.json`: `"tmux"` (a pane on the right; starts a `lexcode` tmux session when needed), `"nvim"` (a split when run in Neovim's `:terminal`), or `"inline"` (Claude takes over the terminal until it exits).
 - **Neovim:**
   - `:LexCode` opens LexCode in a tab, or jumps back to it. Add the plugin with lazy.nvim `{ dir = '<LexCode repo>/nvim' }`, or put that folder on `runtimepath`. It runs `lexcode tui`, or the extension's bundled CLI when `lexcode` isn't installed.
   - With [claudecode.nvim](https://github.com/coder/claudecode.nvim) running, Claude starts with `--ide`, so its edits open as Neovim diffs (`:ClaudeCodeDiffAccept` / `:ClaudeCodeDiffDeny`). This only happens when that Neovim is the one editor open on the project folder; with VS Code or Devin open on it too, Claude starts without `--ide` so it can't connect to the wrong one. If Neovim is on another folder, LexCode tells you to `:cd` there.
@@ -319,7 +315,7 @@ All commands are in the Command Palette under `LexCode:`. Most also appear as in
 | `lexCode.backgroundPermissionMode` | `manual` | Permission mode for background runs: `manual`, `acceptEdits`, `plan`, `auto`, `bypassPermissions` (dangerous). |
 | `lexCode.tasksScanSkip` | `node_modules`, `.git`, `out`, `dist`, … | Folder names skipped when searching for `TASKS.md`. Empty list scans everything. |
 | `lexCode.claudePath` | _(auto)_ | Path to the `claude` CLI. |
-| `lexCode.tui.terminal` | `auto` | `lexcode tui` only: where Claude opens. `auto` (Neovim when inside it, else tmux, else inline), `tmux`, `nvim`, or `inline`. |
+| `lexCode.tui.terminal` | `auto` | `lexcode tui` only: where Claude opens. `auto` (a box inside LexCode, or beside the list with `/split`), `tmux`, `nvim`, or `inline`. |
 | `lexCode.factory.autoStart` | `true` | New epics start the software factory. Off: **New Epic** only creates the epic. |
 | `lexCode.factory.builderPermissionMode` | `acceptEdits` | Builder mode preselected for new factory epics: `acceptEdits` or `auto` (Full auto). |
 | `lexCode.factory.targetBranch` | `main` | Default PR target branch. |

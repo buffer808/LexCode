@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // LexCode outside VS Code:
-//   lexcode [tui]                                          board in the terminal; Claude opens in a tmux/Neovim pane
+//   lexcode [tui]                                          LexCode in the terminal; Claude opens in a box inside it
 //   lexcode ui [--port 7420] [--no-open] [--verbose]       dashboard at http://127.0.0.1:7420
 //   lexcode sync [projectPath] [--dry-run] [--epic <name>]  TASKS.md -> board, for Claude skills and scripts
 //   lexcode epic new [projectPath] --title … | --from -     start a factory epic (the /lexcode-factory skill uses --from -)

@@ -1,7 +1,7 @@
 // `lexcode tui`: LexCode in the terminal, drawn like Claude Code on the normal screen. Events print once into
 // scrollback; the task list (or epics view), the prompt and the status line are redrawn in place under them.
-// Plain text becomes a story, `/` opens the command menu, `@` names a task. Attaching still opens Claude in a
-// tmux/Neovim pane or takes over the terminal (rework steps R3/R4 replace that with a modal and tabs).
+// Plain text becomes a story, `/` opens the command menu, `@` names a task. Attaching runs Claude in a box over
+// the list (modal.ts), or beside it with /split; the tmux, Neovim and inline panes remain as settings.
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -15,6 +15,7 @@ import { dashboardCore } from './dashboardCore';
 import { Host, setHost } from './host';
 import { syncSource } from './importer';
 import { Pane, tmuxPane, nvimPane, inlinePane, ideArgs, ideLocks } from './panes';
+import { Shown, modalPane } from './modal';
 import { Act, SCISSORS, cutHelp, epicNeeds, epicView, pipeline, progress } from './epicView';
 import { validBranch } from './factory';
 import { launcher, cliProjects, opener, onPath } from './server';
@@ -49,7 +50,7 @@ export function readRefs(input: string, base: string): { name: string; mime: str
 export async function tui(boardFile: string) {
   const mode = setting<string>('tui.terminal', 'auto');
   // Plain terminal with tmux installed: run inside a `lexcode` tmux session (reattaches if it's already running).
-  if (mode === 'auto' && !process.env.TMUX && !process.env.NVIM && onPath('tmux')) {
+  if (mode === 'tmux' && !process.env.TMUX && onPath('tmux')) {
     const r = spawnSync('tmux', ['new-session', '-A', '-s', 'lexcode', '-n', 'board', '-e', 'LEXCODE_TMUX=1', '-e', `LEXCODE_BOARD=${boardFile}`,
       '--', process.execPath, path.join(ROOT, 'out', 'cli.js'), 'tui'], { stdio: 'inherit' });
     process.exit(r.status ?? 0);
@@ -147,9 +148,13 @@ export async function tui(boardFile: string) {
   const leave = () => { live.detach(); out.write('\x1b[0m\x1b[?25h\x1b[?2004l'); if (process.stdin.isTTY) process.stdin.setRawMode(false); };
   let suspended = false;
   const tmuxSelf = process.env.TMUX_PANE;
-  const inNvim = (mode === 'nvim' || mode === 'auto') && !!process.env.NVIM;
-  if (inNvim) pane = nvimPane(process.env.NVIM!);
-  else if ((mode === 'tmux' || mode === 'auto') && process.env.TMUX && tmuxSelf) pane = tmuxPane(tmuxSelf);
+  const inNvim = mode === 'nvim' && !!process.env.NVIM;
+  // Default: Claude runs inside LexCode's screen, in a box over the list (modal) or beside it (split).
+  let layout: 'modal' | 'split' = 'modal', focus: 'claude' | 'list' = 'claude';
+  const modal = mode === 'auto' || mode === 'modal' ? modalPane(() => boxSize(), shown => { if (shown) focus = 'claude'; schedule(); }) : undefined;
+  if (modal) pane = modal;
+  else if (inNvim) pane = nvimPane(process.env.NVIM!);
+  else if (mode === 'tmux' && process.env.TMUX && tmuxSelf) pane = tmuxPane(tmuxSelf);
   else pane = inlinePane(() => { suspended = true; leave(); process.stdin.pause(); }, () => { suspended = false; enter(); });
   if (process.env.LEXCODE_TMUX && tmuxSelf) {
     // Our own session: label panes on their top border.
@@ -321,7 +326,8 @@ export async function tui(boardFile: string) {
           continue;
         }
         const s = e.story!;
-        items.push({ cur: on, segs: [[on ? '❯ ' : '  ', ORANGE], [fit(s.title, Math.max(8, W - 36)), on ? ORANGE : ''], [` ${fit(meta(s), 18)} `, DIM], badge(s, ps)] });
+        const mw = W < 70 ? 0 : 18; // narrow (split view): no epic/points column
+        items.push({ cur: on, segs: [[on ? '❯ ' : '  ', ORANGE], [fit(s.title, Math.max(8, W - 16 - mw - (mw && 2))), on ? ORANGE : ''], [mw ? ` ${fit(meta(s), mw)} ` : ' ', DIM], badge(s, ps)] });
         const l = runOf(s) && latest(s);
         if (l) items.push({ segs: [['      ⎿  ', DIM], [l.text, DIM]] });
       }
@@ -413,6 +419,35 @@ export async function tui(boardFile: string) {
   }
 
   /* ---------- drawing ---------- */
+  let pending = false;
+  const schedule = () => { if (!pending) { pending = true; setTimeout(() => { pending = false; render(); }, 16); } };
+  const listW = (W: number) => Math.min(42, Math.floor(W * 0.34));
+  const isSplit = () => layout === 'split' && (out.columns || 80) - 1 >= 119;
+  function boxSize(): [number, number] {
+    const W = (out.columns || 80) - 1, H = out.rows || 24;
+    return [(isSplit() ? W - listW(W) - 1 : W) - 4, Math.max(3, H - 4)];
+  }
+  // A Claude session on screen: the whole live area (modal), or the right side with the list on the left (split).
+  function renderShown(sh: Shown, W: number, H: number) {
+    const [c, r] = boxSize();
+    sh.e.resize(c, r);
+    const on = focus === 'claude', split = isSplit();
+    const s = data!.board.stories.find(x => x.id === sh.key), run = s && runOf(s);
+    const title: Seg[] = [['✻ ', ORANGE], [sh.label, BOLD], [run ? ` · run ${run.id}` : '', DIM], [' · Claude Code', DIM]];
+    const framed = box(sh.e.lines(on), c + 4, on ? ORANGE : DIM,
+      split ? (on ? 'ctrl+] list · ctrl+\\ close split' : 'ctrl+] back to Claude') : 'ctrl+] close · the session keeps running', title);
+    const parked = pane.state().parked.length;
+    const right = `⏵⏵ ${view} · ${project()?.name ?? ''}${parked ? ` · ${parked} more running` : ''}`;
+    const hint = on ? (split ? 'typing goes to Claude' : 'ctrl+] back to LexCode · the run keeps going') : '↑↓ select · ⏎ show in the pane · space peek';
+    const status = line([[`  ${fit(hint, Math.max(0, W - width(right) - 3))} `, DIM], [right, ORANGE]], W);
+    if (!split) return live.draw([...framed, status]);
+    const L = listW(W), p = project();
+    const items = !p ? [] : view === 'board' ? boardList(L) : taskItems(L);
+    const room = framed.length - 1, cur = items.findIndex(i => i.cur);
+    scroll = items.length <= room ? 0 : Math.max(0, Math.min(scroll, cur < 0 ? 0 : cur), cur - room + 1);
+    const left = [line([[p?.name ?? '', BOLD], [`  ${view}`, DIM]], L), ...items.slice(scroll, scroll + room).map(i => line(i.segs, L))];
+    live.draw([...framed.map((f, i) => `${left[i] ?? ' '.repeat(L)} ${f}`), status]);
+  }
   const HINTS: Record<View, () => string> = {
     tasks: () => current()?.epic ? '⏎ open epic · ←→ project · / commands' : selected() ? '⏎ attach · space peek · ←→ project · / commands' : '/ commands',
     board: () => selected() ? '⏎ attach · space peek · ←→ column · shift+←→ move' : '←→ column · / commands',
@@ -424,6 +459,9 @@ export async function tui(boardFile: string) {
     const W = (out.columns || 80) - 1, H = out.rows || 24;
     if (!data) return live.draw([sgr(DIM, `${SPIN[tick % SPIN.length]} Loading board…`)]);
     clamp();
+    const sh = modal?.shown();
+    if (sh && !asks[0]) return renderShown(sh, W, H);
+    if (!sh) focus = 'list';
     const p = project(), a = asks[0];
     const bottom: string[] = [];
     const ps = peek && view !== 'projects' && view !== 'epics' ? stories().find(s => s.id === peek) : undefined;
@@ -634,6 +672,15 @@ export async function tui(boardFile: string) {
       }
       case 'epic': if (need(p, 'Add a project first: /add-project.')) await newEpic(p!); return;
       case 'tasks': case 'board': case 'epics': case 'projects': setView(name); return;
+      case 'split': {
+        if (!modal) return say('error', 'Split view needs "lexCode.tui.terminal" set to "auto" or "modal".');
+        layout = 'split';
+        if (!isSplit()) say('warn', 'Split view needs a terminal at least 120 columns wide; showing the session full width until it is.');
+        if (modal.shown()) { focus = 'claude'; return; }
+        const s = storyRef(refs);
+        if (s) attach(s, false); else modal.focus();
+        return;
+      }
       case 'remove-project': if (need(p, 'No project.')) core.handle({ type: 'removeProject', id: p!.id }); return;
       case 'project': { const x = pick(projects(), q => q.name, args[0] ?? ''); if (need(x, `No project matches "${args[0] ?? ''}".`)) { switchProject(projects().indexOf(x!) - pi); } return; }
       case 'next': nextNeeding(); scroll = 0; return;
@@ -690,7 +737,10 @@ export async function tui(boardFile: string) {
     }
   }
 
-  const quit = () => {
+  const quit = async () => {
+    const n = modal?.running().length ?? 0;
+    if (n && !await host.message('warn', `${n} Claude session${n > 1 ? 's' : ''} running inside LexCode will stop when you quit. Their transcripts stay, and attaching resumes them.`, undefined, 'Quit')) return;
+    modal?.running().forEach(x => x.e.kill());
     quitting = true;
     leave();
     fs.unwatchFile(boardFile);
@@ -701,9 +751,31 @@ export async function tui(boardFile: string) {
   process.on('exit', () => { if (!quitting) leave(); });
 
   const fail = (e: any) => say('error', e.message);
+  // While a Claude session has the keyboard, raw bytes go to it; ctrl+] and ctrl+\ stay ours.
+  // Registered before the keypress listener, so `swallow` can stop the same bytes being read as LexCode keys.
+  let swallow = false;
+  process.stdin.on('data', (b: Buffer) => {
+    const sh = modal?.shown();
+    if (suspended || !sh || asks[0]) return;
+    let d = b.toString('utf8');
+    const own = d.includes('\x1d') || (isSplit() && d.includes('\x1c'));
+    if (!own && focus !== 'claude') return;
+    swallow = true;
+    setImmediate(() => { swallow = false; });
+    if (isSplit() && d.includes('\x1c')) { layout = 'modal'; modal!.hide(); return; }
+    if (d.includes('\x1d')) {
+      d = '';
+      if (isSplit()) focus = focus === 'claude' ? 'list' : 'claude';
+      else modal!.hide();
+    }
+    if (d) sh.e.write(d);
+    render();
+  });
   readline.emitKeypressEvents(process.stdin);
   process.stdin.on('keypress', (str: string | undefined, key: readline.Key = {}) => {
-    if (suspended) return;
+    if (suspended || swallow) return;
+    // Split view with the list focused: navigation keys only, the prompt isn't on screen.
+    if (modal?.shown() && !asks[0] && str && str >= ' ' && str !== ' ' && !key.ctrl && !key.meta) return;
     if (key.name === 'paste-start') { pasting = true; return; }
     if (key.name === 'paste-end') { pasting = false; return render(); }
     const a = asks[0], ed = a ?? pr;

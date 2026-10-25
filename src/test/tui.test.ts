@@ -81,3 +81,22 @@ test('render line and box keep every row at the given width', () => {
   assert.strictEqual(plain(line([['> ', '33'], ['日本語 text']], 8)), '> 日本… ');
   for (const r of box([[['a']], [['much too long for the box']]], 12, '2', 'esc')) assert.strictEqual(width(plain(r)), 12);
 });
+
+test('Embedded keeps a program\'s screen: styled lines of exactly cols columns, and it reports exit', async () => {
+  const { Embedded } = require('../modal') as typeof import('../modal');
+  const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+  await new Promise<void>((resolve, reject) => {
+    const e = new Embedded(['sh', '-c', `printf '\\033[31mred\\033[0m 日本 %s' "$(tput cols)"`], os.tmpdir(), 20, 3, () => {}, () => {
+      setTimeout(() => {
+        try {
+          const ls = e.lines(false);
+          assert.strictEqual(ls.length, 3);
+          assert.strictEqual(plain(ls[0]), 'red 日本 20         ');
+          assert.match(ls[0], /\x1b\[0;38;5;1mred/);
+          assert.ok(e.exited);
+          resolve();
+        } catch (err) { reject(err); }
+      }, 50);
+    });
+  });
+});
