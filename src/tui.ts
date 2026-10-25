@@ -1,24 +1,24 @@
 // `lexcode tui`: LexCode in the terminal, drawn like Claude Code on the normal screen. Events print once into
 // scrollback; the task list (or epics view), the prompt and the status line are redrawn in place under them.
 // Plain text becomes a story, `/` opens the command menu, `@` names a task. Attaching runs Claude in a box over
-// the list (modal.ts), or beside it with /split; the tmux, Neovim and inline panes remain as settings.
+// the list (modal.ts), or beside it with /split; /attach --tab opens it in a new terminal tab instead.
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as readline from 'readline';
 import { createHash } from 'crypto';
-import { execFile, spawnSync } from 'child_process';
+import { execFile } from 'child_process';
 import { Store, Board, Story, Status, Project } from './store';
-import { Agent, AgentWatcher, liveRun, claudeBin, storySessions } from './claude';
+import { Agent, AgentWatcher, liveRun, storySessions } from './claude';
 import { FactoryRunner } from './factoryRunner';
 import { dashboardCore } from './dashboardCore';
 import { Host, setHost } from './host';
 import { syncSource } from './importer';
-import { Pane, tmuxPane, nvimPane, inlinePane, ideArgs, ideLocks } from './panes';
+import { Pane, inlinePane } from './panes';
 import { Shown, modalPane } from './modal';
 import { Act, SCISSORS, cutHelp, epicNeeds, epicView, pipeline, progress } from './epicView';
 import { validBranch } from './factory';
-import { launcher, cliProjects, opener, onPath } from './server';
+import { launcher, cliProjects, opener, onPath, terminalTab } from './server';
 import { HOME, setting } from './config';
 import { Step, sessionDir, transcriptTail } from './sessions';
 import { Live, Seg, box, fit, line, sgr, width, SPIN, ORANGE, DIM, GREEN, YELLOW, RED, BOLD } from './render';
@@ -49,12 +49,6 @@ export function readRefs(input: string, base: string): { name: string; mime: str
 /* ---------- app ---------- */
 export async function tui(boardFile: string) {
   const mode = setting<string>('tui.terminal', 'auto');
-  // Plain terminal with tmux installed: run inside a `lexcode` tmux session (reattaches if it's already running).
-  if (mode === 'tmux' && !process.env.TMUX && onPath('tmux')) {
-    const r = spawnSync('tmux', ['new-session', '-A', '-s', 'lexcode', '-n', 'board', '-e', 'LEXCODE_TMUX=1', '-e', `LEXCODE_BOARD=${boardFile}`,
-      '--', process.execPath, path.join(ROOT, 'out', 'cli.js'), 'tui'], { stdio: 'inherit' });
-    process.exit(r.status ?? 0);
-  }
   if (!process.stdin.isTTY) throw new Error('lexcode tui needs a terminal');
 
   const out = process.stdout;
@@ -67,10 +61,10 @@ export async function tui(boardFile: string) {
   const say = (level: string, text: string) => live.print([line([['⏺ ', level === 'error' ? RED : level === 'warn' ? YELLOW : GREEN], [text]], width(text) + 2)]);
 
   let pane: Pane;
-  let intent: { key: string; label: string } | undefined; // the card being attached, read by host.terminal
+  let intent: { key: string; label: string; tab?: boolean } | undefined; // the card being attached, read by host.terminal
   // Attaches run one at a time so each launch reads its own intent (keys in one stdin chunk arrive back to back).
   let launches = Promise.resolve();
-  const launch = (i: { key: string; label: string }, run: () => unknown) => {
+  const launch = (i: { key: string; label: string; tab?: boolean }, run: () => unknown) => {
     launches = launches.then(async () => { intent = i; try { await run(); } finally { intent = undefined; } }).catch(e => host.log(e.message));
   };
   const host: Host = {
@@ -82,16 +76,15 @@ export async function tui(boardFile: string) {
     setting,
     terminal(title, cwd, argv) {
       const key = intent?.key ?? createHash('sha1').update(JSON.stringify([cwd, argv])).digest('hex').slice(0, 12);
-      const label = intent?.label ?? title;
+      const label = intent?.label ?? title, tab = intent?.tab;
       intent = undefined;
-      // In Neovim with claudecode.nvim: --ide so Claude's edits open as Neovim diffs.
-      if (inNvim) { const r = ideArgs(argv, claudeBin(), ideLocks(), cwd); argv = r.argv; if (r.hint) host.message('info', r.hint); }
-      try { pane.open(key, label, () => launcher(label, cwd, argv)); } // its title escape names the tmux pane too
-      catch (e: any) { host.message('error', `Couldn't open the Claude pane: ${e.message}`); }
+      try {
+        if (tab) host.message('info', `Opened ${label} in ${terminalTab(label, cwd, argv)}`);
+        else pane.open(key, label, () => launcher(label, cwd, argv));
+      } catch (e: any) { host.message('error', `Couldn't open Claude: ${e.message}`); }
     },
     openFile(file, opts) {
-      if (pane.edit) return pane.edit(file, opts?.line);
-      if (opts?.preview) { // rendered markdown (plans): a pager over the board
+      if (opts?.preview) { // rendered markdown (plans): a pager over the list
         const viewer = onPath('glow') ? ['glow', '-p', file] : ['less', '-R', file];
         return pane.popup(() => launcher(path.basename(file), path.dirname(file), viewer));
       }
@@ -108,8 +101,8 @@ export async function tui(boardFile: string) {
     const file = path.join(dir, 'TEXT.md'), done = path.join(dir, 'done');
     try {
       fs.writeFileSync(file, `${initial}\n\n${SCISSORS}\n${hint.split('\n').map(l => `# ${l}`).join('\n')}\n# Everything from the >8 line down is ignored. Leave the text empty to cancel.\n`, { mode: 0o600 });
-      // The launcher writes `done` once the editor exits; Neovim's floating window writes it on close.
-      pane.popup(() => launcher('LexCode · edit', dir, ['sh', '-c', '"$@"; : > "$0"', done, ...editor(), file]), { file, done });
+      // The launcher writes `done` once the editor exits.
+      pane.popup(() => launcher('LexCode · edit', dir, ['sh', '-c', '"$@"; : > "$0"', done, ...editor(), file]));
       while (!fs.existsSync(done)) await new Promise(r => setTimeout(r, 500));
       return cutHelp(fs.readFileSync(file, 'utf8')) || undefined;
     } catch (e: any) {
@@ -147,19 +140,10 @@ export async function tui(boardFile: string) {
   };
   const leave = () => { live.detach(); out.write('\x1b[0m\x1b[?25h\x1b[?2004l'); if (process.stdin.isTTY) process.stdin.setRawMode(false); };
   let suspended = false;
-  const tmuxSelf = process.env.TMUX_PANE;
-  const inNvim = mode === 'nvim' && !!process.env.NVIM;
   // Default: Claude runs inside LexCode's screen, in a box over the list (modal) or beside it (split).
   let layout: 'modal' | 'split' = 'modal', focus: 'claude' | 'list' = 'claude';
   const modal = mode === 'auto' || mode === 'modal' ? modalPane(() => boxSize(), shown => { if (shown) focus = 'claude'; schedule(); }) : undefined;
-  if (modal) pane = modal;
-  else if (inNvim) pane = nvimPane(process.env.NVIM!);
-  else if (mode === 'tmux' && process.env.TMUX && tmuxSelf) pane = tmuxPane(tmuxSelf);
-  else pane = inlinePane(() => { suspended = true; leave(); process.stdin.pause(); }, () => { suspended = false; enter(); });
-  if (process.env.LEXCODE_TMUX && tmuxSelf) {
-    // Our own session: label panes on their top border.
-    execFile('tmux', ['set', '-w', '-t', tmuxSelf, 'pane-border-status', 'top', ';', 'set', '-w', '-t', tmuxSelf, 'pane-border-format', ' #{pane_title} ', ';', 'select-pane', '-t', tmuxSelf, '-T', 'board']);
-  }
+  pane = modal ?? inlinePane(() => { suspended = true; leave(); process.stdin.pause(); }, () => { suspended = false; enter(); });
 
   /* ---------- selection ---------- */
   let pi = 0, pj = 0, bcol = 0, scroll = 0, tick = 0;
@@ -506,14 +490,14 @@ export async function tui(boardFile: string) {
   }
 
   /* ---------- keys ---------- */
-  const attach = (s: Story, fresh: boolean) => {
-    const st = pane.state();
-    if (fresh && (st.open === s.id || st.parked.includes(s.id))) {
-      return host.message('warn', 'This card already has a Claude pane. Exit that Claude first, then start a new session.');
+  const attach = (s: Story, fresh: boolean, tab = false) => {
+    const st = pane.state(), here = st.open === s.id || st.parked.includes(s.id);
+    if (here && (fresh || tab)) {
+      return host.message('warn', `${s.title} already has a Claude session running inside LexCode. Exit that Claude first${tab ? ', then open it in a tab' : ', then start a new session'}.`);
     }
-    if (!fresh && pane.show(s.id)) return render();
+    if (!fresh && !tab && pane.show(s.id)) return render();
     const run = liveRun(s, data!.agents);
-    launch({ key: s.id, label: s.title }, () =>
+    launch({ key: s.id, label: s.title, tab }, () =>
       core.handle(fresh ? { type: 'newSession', id: s.id } : run ? { type: 'attach', id: s.id, sessionId: run.sessionId } : { type: 'claude', id: s.id }));
   };
   const gate = (epicId: string, decision: string, extra: Record<string, unknown> = {}) => core.handle({ type: 'factoryGate', epicId, decision, ...extra });
@@ -658,7 +642,7 @@ export async function tui(boardFile: string) {
     const need = <T>(x: T | undefined, why: string) => { if (!x) say('error', why); return x; };
     switch (name) {
       case 'new': if (need(p, 'Add a project first: /add-project.') && args.length) core.handle({ type: 'add', id: p!.id, title: text.trim().replace(/^\/new\s+/i, '') }); return;
-      case 'attach': { if (!refs.length && view === 'tasks' && current()?.epic) return openEpic(current()!.epic!.id); const s = storyRef(refs); if (need(s, 'No task selected.')) attach(s!, flags.includes('new')); return; }
+      case 'attach': { if (!refs.length && view === 'tasks' && current()?.epic) return openEpic(current()!.epic!.id); const s = storyRef(refs); if (need(s, 'No task selected.')) attach(s!, flags.includes('new'), flags.includes('tab')); return; }
       case 'move': {
         const to = args[0] as Status, s = storyRef(refs);
         if (!STATUSES.includes(to)) return say('error', `Status is one of ${STATUSES.join(', ')}.`);

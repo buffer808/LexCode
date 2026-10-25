@@ -36,13 +36,34 @@ export const onPath = (bin: string) => (process.env.PATH ?? '').split(path.delim
 const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 // Unix: a self-deleting script that runs argv in cwd, so prompts with quotes/newlines survive and never meet a shell
-// unquoted. Also keeps long prompts off tmux/nvim command lines. ext: '.command' makes macOS open it in the terminal app.
+// unquoted. Also keeps long prompts off terminal command lines. ext: '.command' makes macOS open it in the terminal app.
 export function launcher(title: string, cwd: string, argv: string[], ext = '.sh') {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lexcode-'));
   const file = path.join(dir, `claude${ext}`);
   fs.writeFileSync(file, ['#!/bin/sh', `rm -rf ${shellQuote(dir)}`, `printf '\\033]0;%s\\007' ${shellQuote(title)}`,
     `cd ${shellQuote(cwd)} || exit 1`, argv.map(shellQuote).join(' '), ''].join('\n'), { mode: 0o700, flag: 'wx' });
   return file;
+}
+
+// Runs argv in a new tab of the terminal LexCode itself runs in, where that terminal can be told to;
+// otherwise a new window (macOS: a tab only if the system prefers tabs). Returns where, for the message.
+export function terminalTab(title: string, cwd: string, argv: string[]): string {
+  const run = (cmd: string, args: string[]) => spawn(cmd, args, { detached: true, stdio: 'ignore' })
+    .on('error', e => console.error(`Couldn't open a tab (${cmd}): ${e.message}`)).unref();
+  const script = () => launcher(title, cwd, argv);
+  const env = process.env;
+  if (env.TMUX) { run('tmux', ['new-window', '-n', title.replace(/[\x00-\x1f#]/g, ' ').slice(0, 30), '--', 'sh', script()]); return 'a new tmux window'; }
+  if (env.TERM_PROGRAM === 'iTerm.app') {
+    // The script path travels as an AppleScript argument, never inside the script text.
+    run('osascript', ['-e', 'on run argv', '-e', 'tell application "iTerm2" to tell current window to create tab with default profile command ("sh " & quoted form of item 1 of argv)', '-e', 'end run', script()]);
+    return 'a new iTerm2 tab';
+  }
+  if (env.TERM_PROGRAM === 'WezTerm' && onPath('wezterm')) { run('wezterm', ['cli', 'spawn', '--cwd', cwd, '--', 'sh', script()]); return 'a new WezTerm tab'; }
+  if (env.KITTY_WINDOW_ID && onPath('kitten')) { run('kitten', ['@', 'launch', '--type=tab', '--cwd', cwd, 'sh', script()]); return 'a new kitty tab (needs allow_remote_control in kitty.conf)'; }
+  if (env.GNOME_TERMINAL_SCREEN && onPath('gnome-terminal')) { run('gnome-terminal', ['--tab', '--', 'sh', script()]); return 'a new GNOME Terminal tab'; }
+  if (env.KONSOLE_DBUS_SESSION && onPath('konsole')) { run('konsole', ['--new-tab', '-e', 'sh', script()]); return 'a new Konsole tab'; }
+  nativeTerminal(title, cwd, argv);
+  return 'a new terminal window';
 }
 
 // Runs argv in a new window of the user's terminal app.

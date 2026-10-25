@@ -6,7 +6,7 @@ export interface Command { name: string; args?: string; help: string; views?: Vi
 
 export const COMMANDS: Command[] = [
   { name: 'new', args: '<title>', help: 'New story in this project (or just type it)' },
-  { name: 'attach', args: '[@task] [--new]', help: 'Open the task\'s Claude session; --new starts a fresh one' },
+  { name: 'attach', args: '[@task] [--new] [--tab]', help: 'Open the task\'s Claude session; --new starts a fresh one, --tab in a new terminal tab' },
   { name: 'split', args: '[@task]', help: 'Claude beside the list instead of over it (120+ columns)' },
   { name: 'move', args: '<todo|doing|review|done> [@task]', help: 'Change a task\'s status', views: ['tasks', 'board'] },
   { name: 'delete', args: '[@task]', help: 'Delete a task', views: ['tasks', 'board'] },

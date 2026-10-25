@@ -84,11 +84,9 @@ lexcode          # same as `lexcode tui`
 - **`/next`** jumps to the next thing waiting on you, in any project: a plan or PR gate, a merge to approve, a blocked sprint or story, or a session asking for permission.
 - **Where Claude opens:** in a box over the list, inside LexCode's own screen (it runs `claude` in an embedded terminal). Everything you type goes to Claude; `ctrl+]` closes the box and the session keeps running (`⏸ parked`), and opening the task again brings it back. Quitting LexCode stops sessions running inside it (after asking); their transcripts stay, so attaching resumes them.
   - **`/split`** puts Claude beside the list instead (terminal 120+ columns wide). `ctrl+]` switches the keyboard between list and Claude, `⏎` on another task shows that one in the pane, `ctrl+\` closes the split.
-  - Older pane modes are still there with `"lexCode.tui.terminal"` in `~/.lexcode/settings.json`: `"tmux"` (a pane on the right; starts a `lexcode` tmux session when needed), `"nvim"` (a split when run in Neovim's `:terminal`), or `"inline"` (Claude takes over the terminal until it exits).
-- **Neovim:**
-  - `:LexCode` opens LexCode in a tab, or jumps back to it. Add the plugin with lazy.nvim `{ dir = '<LexCode repo>/nvim' }`, or put that folder on `runtimepath`. It runs `lexcode tui`, or the extension's bundled CLI when `lexcode` isn't installed.
-  - With [claudecode.nvim](https://github.com/coder/claudecode.nvim) running, Claude starts with `--ide`, so its edits open as Neovim diffs (`:ClaudeCodeDiffAccept` / `:ClaudeCodeDiffDeny`). This only happens when that Neovim is the one editor open on the project folder; with VS Code or Devin open on it too, Claude starts without `--ide` so it can't connect to the wrong one. If Neovim is on another folder, LexCode tells you to `:cd` there.
-- **Long text** (epic description, plan changes, send-back notes) opens in `$VISUAL`/`$EDITOR`: a tmux popup (tmux 3.2+), a floating window inside Neovim, or the whole terminal otherwise. Text below the `>8` line is help and is dropped; leave it empty to cancel. `/plan` shows the plan with `glow` if installed, else `less`.
+  - **`/attach --tab`** opens the session in a new tab of your terminal instead: iTerm2, WezTerm, kitty (with `allow_remote_control`), GNOME Terminal, Konsole, or a tmux window when LexCode runs inside tmux. Other terminals get a new window (macOS Terminal and Ghostty make it a tab when the system prefers tabs).
+  - `"lexCode.tui.terminal": "inline"` in `~/.lexcode/settings.json` lets Claude take over the whole terminal until it exits, instead of the box.
+- **Long text** (epic description, plan changes, send-back notes) opens in `$VISUAL`/`$EDITOR` in the same box. Text below the `>8` line is help and is dropped; leave it empty to cancel. `/plan` shows the plan with `glow` if installed, else `less`.
 - Shares `board.json`, settings, and factory locks with VS Code and `lexcode ui`. The factory advances while any of them runs; quitting one hands its epics to the others at once.
 - Logs go to `~/.lexcode/tui.log`.
 
@@ -315,7 +313,7 @@ All commands are in the Command Palette under `LexCode:`. Most also appear as in
 | `lexCode.backgroundPermissionMode` | `manual` | Permission mode for background runs: `manual`, `acceptEdits`, `plan`, `auto`, `bypassPermissions` (dangerous). |
 | `lexCode.tasksScanSkip` | `node_modules`, `.git`, `out`, `dist`, … | Folder names skipped when searching for `TASKS.md`. Empty list scans everything. |
 | `lexCode.claudePath` | _(auto)_ | Path to the `claude` CLI. |
-| `lexCode.tui.terminal` | `auto` | `lexcode tui` only: where Claude opens. `auto` (a box inside LexCode, or beside the list with `/split`), `tmux`, `nvim`, or `inline`. |
+| `lexCode.tui.terminal` | `auto` | `lexcode tui` only: where Claude opens. `auto` (a box inside LexCode, or beside the list with `/split`) or `inline` (Claude takes over the terminal until it exits). |
 | `lexCode.factory.autoStart` | `true` | New epics start the software factory. Off: **New Epic** only creates the epic. |
 | `lexCode.factory.builderPermissionMode` | `acceptEdits` | Builder mode preselected for new factory epics: `acceptEdits` or `auto` (Full auto). |
 | `lexCode.factory.targetBranch` | `main` | Default PR target branch. |
