@@ -333,29 +333,36 @@ export async function tui(boardFile: string) {
     });
     return items;
   }
-  // Wide board: four columns of two-line cards.
+  // Wide board: four columns, one line per card; each column scrolls on its own, with ↑/↓ n more markers.
+  const colOff = [0, 0, 0, 0];
   function boardLines(W: number, room: number): string[] {
     const ps = pane.state(), cs = columns(), cur = current()?.key;
-    const cw = Math.floor((W - 6) / 4), sep = sgr(DIM, ' │ ');
+    const cw = Math.floor((W - 9) / 4), sep = sgr(DIM, ' │ '); // 3 separators of 3 columns
     const head = cs.map((l, c) => line([[LABEL[STATUSES[c]].toUpperCase(), c === bcol ? `${BOLD};${ORANGE}` : BOLD], [` ${l.length}`, DIM]], cw)).join(sep);
-    const fits = Math.max(1, Math.floor((room - 3) / 3));
-    const row = Math.max(0, cs[bcol].findIndex(s => `s:${s.id}` === cur));
-    const off = Math.max(0, row - fits + 1);
-    const cells = (c: number, i: number): [Seg[], Seg[]] => {
-      const s = cs[c][i + (c === bcol ? off : 0)];
-      if (!s) return [[['']], [['']]];
-      const on = `s:${s.id}` === cur, b = badge(s, ps);
-      return [[[on ? '❯ ' : '  ', ORANGE], [s.title, on ? `${BOLD};${ORANGE}` : '']], [['  '], b[0] ? b : [meta(s) || ' ', DIM]]];
-    };
-    const out: string[] = [head];
-    for (let i = 0; i < fits; i++) {
-      const rows = [0, 1, 2, 3].map(c => cells(c, i));
-      if (rows.every(r => r[0].length === 1 && !r[0][0][0])) break;
-      out.push(rows.map(r => line(r[0], cw)).join(sep), rows.map(r => line(r[1], cw)).join(sep), [0, 1, 2, 3].map(() => ' '.repeat(cw)).join(sep));
-    }
+    const rows = Math.max(1, room - 2); // header and detail line
+    const cols = cs.map((list, c) => {
+      const out: Seg[][] = [];
+      const fits = list.length <= rows ? list.length : rows - 2; // room for both markers when it scrolls
+      if (c === bcol) {
+        const i = Math.max(0, list.findIndex(s => `s:${s.id}` === cur));
+        colOff[c] = Math.max(0, Math.min(colOff[c], i, list.length - fits), i - fits + 1);
+      }
+      const off = list.length <= rows ? 0 : Math.min(colOff[c], list.length - fits);
+      if (list.length > rows) out.push([[off ? `  ↑ ${off} more` : '', DIM]]);
+      for (const s of list.slice(off, off + fits)) {
+        const on = `s:${s.id}` === cur, b = badge(s, ps), bw = b[0] ? width(b[0]) + 1 : 0;
+        out.push([[on ? '❯ ' : '  ', ORANGE], [fit(s.title, Math.max(4, cw - 2 - bw)), on ? `${BOLD};${ORANGE}` : ''], ...(b[0] ? [[' '] as Seg, b] : [])]);
+      }
+      const below = list.length - off - fits;
+      if (list.length > rows) out.push([[below > 0 ? `  ↓ ${below} more` : '', DIM]]);
+      return out;
+    });
+    const height = Math.max(...cols.map(c => c.length));
+    const out = [head];
+    for (let i = 0; i < height; i++) out.push(cols.map(c => line(c[i] ?? [['']], cw)).join(sep));
     const s = selected(), l = s && latest(s), run = s && runOf(s);
-    out.push(s ? line([['  ⎿  ', DIM], [run ? `${run.state} · run ${run.id}` : s.sessionIds?.length ? `${s.sessionIds.length} past session(s)` : 'no session yet', DIM],
-      [l ? ` · ${l.text}` : '', DIM]], W) : '');
+    out.push(s ? line([['  ⎿  ', DIM], [s.title, BOLD], [run ? ` · ${run.state} · run ${run.id}` : s.sessionIds?.length ? ` · ${s.sessionIds.length} past session(s)` : ' · no session yet', DIM],
+      [l ? ` · ${l.text}` : '', DIM], [meta(s) ? ` · ${meta(s)}` : '', DIM]], W) : '');
     return out;
   }
 
