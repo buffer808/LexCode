@@ -64,3 +64,20 @@ test('ideArgs adds --ide only when exactly one live IDE covers the folder and it
   assert.deepStrictEqual(other.argv, argv);
   assert.match(other.hint ?? '', /:cd \/w\/application/);
 });
+
+test('slash commands: parse splits args, @refs and --flags; complete and pick prefer prefixes', () => {
+  const { parse, complete, pick } = require('../commands') as typeof import('../commands');
+  assert.deepStrictEqual(parse('/Move review @log --new'), { name: 'move', args: ['review'], refs: ['log'], flags: ['new'] });
+  assert.deepStrictEqual(complete('/a', 'tasks').map(c => c.name).slice(0, 3), ['attach', 'add-project', 'tasks']);
+  assert.ok(!complete('/', 'tasks').some(c => c.name === 'approve'), 'epics-only commands stay out of the tasks view');
+  const names = ['Dialog fix', 'Fix login redirect', 'Login page'];
+  assert.strictEqual(pick(names, n => n, 'pag'), 'Login page');
+  assert.strictEqual(pick(names, n => n, 'redir'), 'Fix login redirect');
+});
+
+test('render line and box keep every row at the given width', () => {
+  const { line, box, width } = require('../render') as typeof import('../render');
+  const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+  assert.strictEqual(plain(line([['> ', '33'], ['日本語 text']], 8)), '> 日本… ');
+  for (const r of box([[['a']], [['much too long for the box']]], 12, '2', 'esc')) assert.strictEqual(width(plain(r)), 12);
+});
