@@ -19,8 +19,9 @@ import { Act, SCISSORS, cutHelp, epicNeeds, epicView, pipeline, progress } from 
 import { validBranch } from './factory';
 import { launcher, cliProjects, opener, onPath } from './server';
 import { HOME, setting } from './config';
+import { Step, sessionDir, transcriptTail } from './sessions';
 import { Live, Seg, box, fit, line, sgr, width, SPIN, ORANGE, DIM, GREEN, YELLOW, RED, BOLD } from './render';
-import { COMMANDS, View, complete, epicCommand, parse, pick } from './commands';
+import { COMMANDS, VIEWS, View, complete, epicCommand, parse, pick } from './commands';
 export { fit };
 
 const STATUSES: Status[] = ['todo', 'doing', 'review', 'done'];
@@ -155,50 +156,70 @@ export async function tui(boardFile: string) {
     execFile('tmux', ['set', '-w', '-t', tmuxSelf, 'pane-border-status', 'top', ';', 'set', '-w', '-t', tmuxSelf, 'pane-border-format', ' #{pane_title} ', ';', 'select-pane', '-t', tmuxSelf, '-T', 'board']);
   }
 
-  /* ---------- selection: one list grouped by status ---------- */
-  let pi = 0, col = 0, row = 0, scroll = 0, tick = 0;
-  let selId: string | undefined; // the cursor follows the card when it changes status (attach, /move, other windows)
+  /* ---------- selection ---------- */
+  let pi = 0, pj = 0, bcol = 0, scroll = 0, tick = 0;
+  // Tasks and board views: 's:<story id>' or (tasks only) 'e:<epic id>'. The cursor follows the item as it changes group.
+  let sel: string | undefined;
   let view: View = 'tasks';
+  let peek: string | undefined; // story whose transcript shows under the list
   const projects = () => data?.board.projects ?? [];
   const project = () => projects()[Math.min(pi, projects().length - 1)];
-  const columns = () => {
-    const p = project();
-    return STATUSES.map(st => (data?.board.stories ?? []).filter(s => s.projectId === p?.id && !s.archived && s.status === st));
+  const stories = () => (data?.board.stories ?? []).filter(s => s.projectId === project()?.id && !s.archived);
+  const columns = () => STATUSES.map(st => stories().filter(s => s.status === st));
+  const runOf = (s: Story) => liveRun(s, data!.agents);
+
+  type Entry = { key: string; story?: Story; epic?: Board['epics'][number] };
+  const st = (s: Story): Entry => ({ key: `s:${s.id}`, story: s });
+  // Tasks view: what needs you (blocked runs, epic gates), what runs, what's next. Done only as a count.
+  function groups(): { label: string; color: string; entries: Entry[]; more?: string }[] {
+    const b = data!.board, ss = stories();
+    const gates = b.epics.filter(e => e.projectId === project()?.id && e.stage && epicNeeds(b, e, data!.agents));
+    const idle = ss.filter(s => !runOf(s)), done = idle.filter(s => s.status === 'done').length;
+    return [
+      { label: 'Needs you', color: YELLOW, entries: [...gates.map(e => ({ key: `e:${e.id}`, epic: e })), ...ss.filter(s => runOf(s)?.state === 'blocked').map(st)] },
+      { label: 'Running', color: ORANGE, entries: ss.filter(s => runOf(s) && runOf(s)!.state !== 'blocked').map(st) },
+      { label: 'Up next', color: BOLD, entries: idle.filter(s => s.status === 'todo' || s.status === 'doing').map(st) },
+      { label: 'Review', color: BOLD, entries: idle.filter(s => s.status === 'review').map(st) },
+      { label: 'Done', color: DIM, entries: [], more: done ? `${done} done · /board shows them` : undefined },
+    ];
+  }
+  const entries = () => groups().flatMap(g => g.entries);
+  const current = (): Entry | undefined => {
+    if (view === 'board') {
+      const s = stories().find(x => `s:${x.id}` === sel), c = columns()[bcol];
+      return s ? st(s) : c[0] && st(c[0]);
+    }
+    const es = entries();
+    return es.find(e => e.key === sel) ?? es[0];
   };
-  const stories = () => columns().flat();
-  const selected = (): Story | undefined => columns()[col]?.[row];
+  const selected = (): Story | undefined => current()?.story;
   const clamp = () => {
     pi = Math.max(0, Math.min(pi, projects().length - 1));
-    const cs = columns();
-    const c = selId ? cs.findIndex(l => l.some(s => s.id === selId)) : -1;
-    if (c >= 0) { col = c; row = cs[c].findIndex(s => s.id === selId); }
-    else {
-      col = Math.max(0, Math.min(col, 3));
-      // No cursor on an empty group: go to the nearest group with cards.
-      if (!cs[col].length) col = [1, 2, 3].flatMap(d => [col - d, col + d]).find(i => cs[i]?.length) ?? col;
-      row = Math.max(0, Math.min(row, cs[col].length - 1));
-    }
-    selId = cs[col][row]?.id;
+    pj = Math.max(0, Math.min(pj, projects().length - 1));
+    const s = selected();
+    if (view === 'board' && s) bcol = STATUSES.indexOf(s.status);
+    sel = current()?.key;
   };
-  // up/down cross into the next non-empty status group.
   const step = (dy: number) => {
-    const cs = columns();
-    row += dy;
-    while (col >= 0 && col < 4 && (row < 0 || row >= cs[col].length)) {
-      if (row < 0) { col--; if (col >= 0) row = cs[col].length - 1; } else { col++; row = 0; }
-    }
-    if (col < 0 || col > 3) { col = Math.max(0, Math.min(col, 3)); row = dy < 0 ? 0 : cs[col].length - 1; }
-    selId = cs[col][row]?.id;
+    const list = view === 'board' ? columns()[bcol].map(st) : entries();
+    const i = list.findIndex(e => e.key === sel);
+    sel = list[Math.max(0, Math.min(list.length - 1, i + dy))]?.key ?? sel;
   };
-  const switchProject = (d: number) => { pi = (pi + d + projects().length) % Math.max(1, projects().length); col = row = scroll = 0; selId = selEpic = selRow = undefined; };
+  // Board: next column, keeping the row where it can.
+  const boardCol = (d: number) => {
+    const cs = columns(), row = Math.max(0, cs[bcol].findIndex(s => `s:${s.id}` === sel));
+    bcol = Math.max(0, Math.min(3, bcol + d));
+    const s = cs[bcol][Math.min(row, cs[bcol].length - 1)];
+    sel = s ? `s:${s.id}` : undefined;
+  };
+  const switchProject = (d: number) => { pi = (pi + d + projects().length) % Math.max(1, projects().length); bcol = scroll = 0; sel = selEpic = selRow = peek = undefined; };
 
-  const storyNeeds = (s: Story) => liveRun(s, data!.agents)?.state === 'blocked';
+  const storyNeeds = (s: Story) => runOf(s)?.state === 'blocked';
   const needsYou = (p: Project) => {
     const b = data!.board;
     return b.stories.filter(s => s.projectId === p.id && !s.epicId && storyNeeds(s)).length
       + b.epics.filter(e => e.projectId === p.id && e.stage && epicNeeds(b, e, data!.agents)).length;
   };
-
   /* ---------- epics view: cursor over the epic list, then the selected epic's sprint rows ---------- */
   let selEpic: string | undefined, selRow: string | undefined; // selRow undefined: cursor is on the epic list
   const epicState = () => {
@@ -254,30 +275,124 @@ export async function tui(boardFile: string) {
     return items;
   }
 
-  const badge = (s: Story, st: ReturnType<Pane['state']>): Seg => {
-    const run = liveRun(s, data!.agents);
-    if (st.open === s.id) return ['▣ open', '36'];
+  /* ---------- transcripts: latest action and peek ---------- */
+  const tails = new Map<string, { m: number; steps: Step[] }>();
+  function tail(s: Story, n: number): Step[] {
+    const sid = runOf(s)?.sessionId ?? storySessions(s).at(-1);
+    const p = data!.board.projects.find(x => x.id === s.projectId);
+    if (!sid || !p) return [];
+    let m: number;
+    try { m = fs.statSync(path.join(sessionDir(p.path), `${sid}.jsonl`)).mtimeMs; } catch { return []; }
+    const k = `${sid}:${n}`, c = tails.get(k);
+    if (c?.m === m) return c.steps;
+    const steps = transcriptTail(p.path, sid, n);
+    tails.set(k, { m, steps });
+    return steps;
+  }
+  const stepSegs = (x: Step, indent = ''): Seg[] => x.kind === 'tool' ? [[`${indent}⏺ `, GREEN], [x.text, BOLD]]
+    : x.kind === 'say' ? [[`${indent}⏺ `], [x.text]] : x.kind === 'user' ? [[`${indent}> ${x.text}`, DIM]]
+    : [[`${indent}  ⎿  `, DIM], [x.text, x.kind === 'error' ? RED : DIM]];
+  const latest = (s: Story) => tail(s, 4).filter(x => x.kind === 'tool' || x.kind === 'say').at(-1);
+
+  const badge = (s: Story, ps: ReturnType<Pane['state']>): Seg => {
+    const run = runOf(s);
+    if (ps.open === s.id) return ['▣ open', '36'];
     if (run?.state === 'blocked') return ['! needs you', YELLOW];
     if (run) return [`${SPIN[tick % SPIN.length]} ${run.state}`, ORANGE];
-    if (st.parked.includes(s.id)) return ['⏸ parked', '36'];
+    if (ps.parked.includes(s.id)) return ['⏸ parked', '36'];
     if (s.sessionIds?.length) return ['↻', DIM];
     return [''];
   };
   const meta = (s: Story) => [data!.board.epics.find(e => e.id === s.epicId)?.title, s.points != null && `${s.points}pt`].filter(Boolean).join(' · ');
   const LABEL: Record<Status, string> = { todo: 'To do', doing: 'Doing', review: 'Review', done: 'Done' };
+
   function taskItems(W: number): Item[] {
-    const st = pane.state(), items: Item[] = [];
-    columns().forEach((list, c) => {
-      if (!list.length) return;
+    const ps = pane.state(), items: Item[] = [], cur = current()?.key;
+    for (const g of groups()) {
+      if (!g.entries.length && !g.more) continue;
       if (items.length) items.push({ segs: [['']] });
-      items.push({ segs: [[LABEL[STATUSES[c]], BOLD], [` ${list.length}`, DIM]] });
-      list.forEach((s, r) => {
-        const cur = c === col && r === row, b = badge(s, st), m = meta(s);
-        items.push({ cur, segs: [[cur ? '❯ ' : '  ', ORANGE], [fit(s.title, Math.max(8, W - 36)), cur ? ORANGE : ''], [` ${fit(m, 18)} `, DIM], b] });
-      });
-    });
+      items.push({ segs: [[g.label, g.color === BOLD ? BOLD : `${BOLD};${g.color}`], [g.entries.length ? ` ${g.entries.length}` : '', DIM]] });
+      if (g.more) items.push({ segs: [[`  ${g.more}`, DIM]] });
+      for (const e of g.entries) {
+        const on = e.key === cur;
+        if (e.epic) {
+          items.push({ cur: on, segs: [[on ? '❯ ' : '  ', ORANGE], ['! ', YELLOW], [fit(e.epic.title, Math.max(8, W - 38)), on ? ORANGE : ''],
+            [` ${data!.factory.stages[e.epic.stage!] ?? e.epic.stage}`, DIM]] });
+          continue;
+        }
+        const s = e.story!;
+        items.push({ cur: on, segs: [[on ? '❯ ' : '  ', ORANGE], [fit(s.title, Math.max(8, W - 36)), on ? ORANGE : ''], [` ${fit(meta(s), 18)} `, DIM], badge(s, ps)] });
+        const l = runOf(s) && latest(s);
+        if (l) items.push({ segs: [['      ⎿  ', DIM], [l.text, DIM]] });
+      }
+    }
     if (!items.length) items.push({ segs: [['  No tasks yet. Type one below.', DIM]] });
     return items;
+  }
+
+  // Narrow board: one list grouped by status.
+  function boardList(W: number): Item[] {
+    const ps = pane.state(), items: Item[] = [], cur = current()?.key;
+    columns().forEach((list, c) => {
+      if (items.length) items.push({ segs: [['']] });
+      items.push({ segs: [[LABEL[STATUSES[c]], c === bcol ? `${BOLD};${ORANGE}` : BOLD], [` ${list.length}`, DIM]] });
+      for (const s of list) {
+        const on = `s:${s.id}` === cur;
+        items.push({ cur: on, segs: [[on ? '❯ ' : '  ', ORANGE], [fit(s.title, Math.max(8, W - 18)), on ? ORANGE : ''], [' '], badge(s, ps)] });
+      }
+    });
+    return items;
+  }
+  // Wide board: four columns of two-line cards.
+  function boardLines(W: number, room: number): string[] {
+    const ps = pane.state(), cs = columns(), cur = current()?.key;
+    const cw = Math.floor((W - 6) / 4), sep = sgr(DIM, ' │ ');
+    const head = cs.map((l, c) => line([[LABEL[STATUSES[c]].toUpperCase(), c === bcol ? `${BOLD};${ORANGE}` : BOLD], [` ${l.length}`, DIM]], cw)).join(sep);
+    const fits = Math.max(1, Math.floor((room - 3) / 3));
+    const row = Math.max(0, cs[bcol].findIndex(s => `s:${s.id}` === cur));
+    const off = Math.max(0, row - fits + 1);
+    const cells = (c: number, i: number): [Seg[], Seg[]] => {
+      const s = cs[c][i + (c === bcol ? off : 0)];
+      if (!s) return [[['']], [['']]];
+      const on = `s:${s.id}` === cur, b = badge(s, ps);
+      return [[[on ? '❯ ' : '  ', ORANGE], [s.title, on ? `${BOLD};${ORANGE}` : '']], [['  '], b[0] ? b : [meta(s) || ' ', DIM]]];
+    };
+    const out: string[] = [head];
+    for (let i = 0; i < fits; i++) {
+      const rows = [0, 1, 2, 3].map(c => cells(c, i));
+      if (rows.every(r => r[0].length === 1 && !r[0][0][0])) break;
+      out.push(rows.map(r => line(r[0], cw)).join(sep), rows.map(r => line(r[1], cw)).join(sep), [0, 1, 2, 3].map(() => ' '.repeat(cw)).join(sep));
+    }
+    const s = selected(), l = s && latest(s), run = s && runOf(s);
+    out.push(s ? line([['  ⎿  ', DIM], [run ? `${run.state} · run ${run.id}` : s.sessionIds?.length ? `${s.sessionIds.length} past session(s)` : 'no session yet', DIM],
+      [l ? ` · ${l.text}` : '', DIM]], W) : '');
+    return out;
+  }
+
+  // Projects view: each project with what needs you, what runs, task counts and the last Claude activity.
+  const lastSeen = new Map<string, { at: number; m: number }>();
+  function activity(p: Project) {
+    const c = lastSeen.get(p.id);
+    if (c && Date.now() - c.at < 10000) return c.m;
+    let m = 0;
+    try { const d = sessionDir(p.path); for (const f of fs.readdirSync(d)) if (f.endsWith('.jsonl')) m = Math.max(m, fs.statSync(path.join(d, f)).mtimeMs); } catch { /* no sessions */ }
+    lastSeen.set(p.id, { at: Date.now(), m });
+    return m;
+  }
+  const ago = (m: number) => { if (!m) return 'no Claude sessions'; const s = (Date.now() - m) / 1000;
+    return s < 60 ? 'just now' : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`; };
+  function projectItems(W: number): Item[] {
+    const b = data!.board;
+    return projects().map((p, i) => {
+      const ss = b.stories.filter(s => s.projectId === p.id && !s.archived), n = needsYou(p);
+      const running = ss.filter(s => runOf(s) && runOf(s)!.state !== 'blocked').length;
+      const counts = STATUSES.map(x => ss.filter(s => s.status === x).length).join('/');
+      const epics = b.epics.filter(e => e.projectId === p.id && e.stage && !['done', 'cancelled'].includes(e.stage)).length;
+      const on = i === pj;
+      return { cur: on, segs: [[on ? '❯ ' : '  ', ORANGE], [fit(p.name, Math.max(10, W - 74)), on ? `${BOLD};${ORANGE}` : BOLD], [fit(n ? ` ! ${n} need you` : '', 15), YELLOW],
+        [fit(running ? ` ${SPIN[tick % SPIN.length]} ${running} running` : '', 13), ORANGE], [fit(` ${counts}`, 14), DIM], [fit(epics ? ` ${epics} epic${epics > 1 ? 's' : ''}` : '', 10), DIM],
+        [` ${ago(activity(p))}`, DIM]] };
+    });
   }
 
   /* ---------- prompt state ---------- */
@@ -285,8 +400,8 @@ export async function tui(boardFile: string) {
   const hist: string[] = [];
   let hi = 0, menuAt = 0, pasting = false;
   // The / menu (while typing the command name) or @ suggestions (while typing a task name).
-  type Entry = { label: string; help: string; fill: string; run?: boolean };
-  function menu(): Entry[] {
+  type Choice = { label: string; help: string; fill: string; run?: boolean };
+  function menu(): Choice[] {
     if (asks[0]) return [];
     const v = pr.value;
     if (/^\/\S*$/.test(v)) return complete(v, view).slice(0, 7).map(c => ({ label: `/${c.name}${c.args ? ` ${c.args}` : ''}`, help: c.help,
@@ -298,6 +413,12 @@ export async function tui(boardFile: string) {
   }
 
   /* ---------- drawing ---------- */
+  const HINTS: Record<View, () => string> = {
+    tasks: () => current()?.epic ? '⏎ open epic · ←→ project · / commands' : selected() ? '⏎ attach · space peek · ←→ project · / commands' : '/ commands',
+    board: () => selected() ? '⏎ attach · space peek · ←→ column · shift+←→ move' : '←→ column · / commands',
+    epics: () => [...epicHints(), '←→ epic'].join(' · '),
+    projects: () => '⏎ open · /add-project · /remove-project',
+  };
   function render() {
     if (quitting || suspended) return;
     const W = (out.columns || 80) - 1, H = out.rows || 24;
@@ -305,6 +426,12 @@ export async function tui(boardFile: string) {
     clamp();
     const p = project(), a = asks[0];
     const bottom: string[] = [];
+    const ps = peek && view !== 'projects' && view !== 'epics' ? stories().find(s => s.id === peek) : undefined;
+    if (ps && !a) {
+      const steps = tail(ps, Math.max(3, Math.min(14, Math.floor(H / 3))));
+      bottom.push(...box([[['✻ ', ORANGE], [ps.title, BOLD], [runOf(ps) ? ` · ${runOf(ps)!.state}` : ' · last session', DIM]], [['']],
+        ...(steps.length ? steps.map(x => stepSegs(x)) : [[['No transcript yet.', DIM] as Seg]])], W, ORANGE, 'space close · ⏎ attach'));
+    }
     if (a?.kind === 'choice') {
       bottom.push(...box([[[a.text, a.level === 'error' ? RED : a.level === 'warn' ? YELLOW : BOLD]], ...(a.detail ? [[[a.detail, DIM] as Seg]] : []), [['']],
         ...a.actions.map((x, i): Seg[] => [[i === a.cur ? '❯ ' : '  ', ORANGE], [`${i + 1}. ${x}`, i === a.cur ? ORANGE : '']])], W, ORANGE, 'esc later'));
@@ -320,20 +447,24 @@ export async function tui(boardFile: string) {
     }
     const needs = projects().reduce((n, x) => n + needsYou(x), 0);
     const hints = a ? (a.kind === 'choice' ? '↑↓ choose · ⏎ select · esc later' : '⏎ ok · esc cancel · ctrl+g editor')
-      : pr.value ? '⏎ send · \\⏎ newline · tab complete · ctrl+g editor'
-      : view === 'tasks' ? (selected() ? '⏎ attach · ←→ project · / commands' : '/ commands') : [...epicHints(), '←→ epic'].join(' · ');
-    const right = `⏵⏵ ${view} · ${p?.name ?? 'no project'}${needs ? ` · ${needs} need you` : ''}`;
+      : pr.value ? '⏎ send · \\⏎ newline · tab complete · ctrl+g editor' : HINTS[view]();
+    const right = `⏵⏵ ${view}${view === 'projects' ? '' : ` · ${p?.name ?? 'no project'}`}${needs ? ` · ${needs} need you` : ''}`;
     bottom.push(line([[`  ${fit(hints, Math.max(0, W - width(right) - 3))} `, DIM], [right, needs ? YELLOW : ORANGE]], W));
 
-    const head = p ? line([[projects().length > 1 ? '◂ ' : '', DIM], [p.name, BOLD], [projects().length > 1 ? ' ▸' : '', DIM],
-      [`  ${view === 'epics' ? 'epics' : `${stories().length} tasks`}`, DIM]], W) : line([['No projects yet. /add-project tracks a folder.', DIM]], W);
-    const items = !p ? [] : view === 'epics' ? epicItems(W) : taskItems(W);
+    const many = projects().length > 1;
+    const head = view === 'projects' ? line([['Projects', BOLD], [`  ${projects().length}`, DIM]], W)
+      : p ? line([[many ? '◂ ' : '', DIM], [p.name, BOLD], [many ? ' ▸' : '', DIM], [`  ${view === 'tasks' ? `${stories().length} tasks` : view}`, DIM]], W)
+      : line([['No projects yet. /add-project tracks a folder.', DIM]], W);
     const room = Math.max(0, H - 2 - bottom.length - 1);
-    const c = items.findIndex(i => i.cur);
-    scroll = Math.max(0, Math.min(scroll, c < 0 ? 0 : c), c - room + 1);
-    if (items.length <= room) scroll = 0;
-    const shown = items.slice(scroll, scroll + room).map(i => line(i.segs, W));
-    live.draw([head, ...shown, '', ...bottom]);
+    let body: string[];
+    if (view === 'board' && p && W >= 99) body = boardLines(W, room).slice(0, room);
+    else {
+      const items = view === 'projects' ? projectItems(W) : !p ? [] : view === 'epics' ? epicItems(W) : view === 'board' ? boardList(W) : taskItems(W);
+      const c = items.findIndex(i => i.cur);
+      scroll = items.length <= room ? 0 : Math.max(0, Math.min(scroll, c < 0 ? 0 : c), c - room + 1);
+      body = items.slice(scroll, scroll + room).map(i => line(i.segs, W));
+    }
+    live.draw([head, ...body, '', ...bottom]);
   }
 
   /* ---------- keys ---------- */
@@ -466,11 +597,11 @@ export async function tui(boardFile: string) {
       for (const s of b.stories.filter(x => x.projectId === p.id && !x.archived && !x.epicId && storyNeeds(x))) spots.push({ pi: i, story: s });
     });
     if (!spots.length) return host.message('info', 'Nothing needs you right now.');
-    const here = spots.findIndex(x => x.pi === pi && (view === 'epics' ? x.epic === selEpic && x.row === selRow : x.story?.id === selId));
+    const here = spots.findIndex(x => x.pi === pi && (view === 'epics' ? x.epic === selEpic && x.row === selRow : `s:${x.story?.id}` === sel));
     // From the current spot on; otherwise the first one in or after the current project.
     const next = here >= 0 ? spots[(here + 1) % spots.length] : spots.find(x => x.pi >= pi) ?? spots[0];
     pi = next.pi;
-    if (next.story) { view = 'tasks'; selId = next.story.id; }
+    if (next.story) { view = 'tasks'; sel = `s:${next.story.id}`; }
     else { view = 'epics'; selEpic = next.epic; selRow = next.row; }
   }
 
@@ -489,11 +620,11 @@ export async function tui(boardFile: string) {
     const need = <T>(x: T | undefined, why: string) => { if (!x) say('error', why); return x; };
     switch (name) {
       case 'new': if (need(p, 'Add a project first: /add-project.') && args.length) core.handle({ type: 'add', id: p!.id, title: text.trim().replace(/^\/new\s+/i, '') }); return;
-      case 'attach': { const s = storyRef(refs); if (need(s, 'No task selected.')) attach(s!, flags.includes('new')); return; }
+      case 'attach': { if (!refs.length && view === 'tasks' && current()?.epic) return openEpic(current()!.epic!.id); const s = storyRef(refs); if (need(s, 'No task selected.')) attach(s!, flags.includes('new')); return; }
       case 'move': {
         const to = args[0] as Status, s = storyRef(refs);
         if (!STATUSES.includes(to)) return say('error', `Status is one of ${STATUSES.join(', ')}.`);
-        if (need(s, 'No task selected.')) { selId = s!.id; core.handle({ type: 'status', id: s!.id, status: to }); }
+        if (need(s, 'No task selected.')) { sel = `s:${s!.id}`; core.handle({ type: 'status', id: s!.id, status: to }); }
         return;
       }
       case 'delete': {
@@ -502,7 +633,8 @@ export async function tui(boardFile: string) {
         return;
       }
       case 'epic': if (need(p, 'Add a project first: /add-project.')) await newEpic(p!); return;
-      case 'tasks': case 'epics': view = name; scroll = 0; return;
+      case 'tasks': case 'board': case 'epics': case 'projects': setView(name); return;
+      case 'remove-project': if (need(p, 'No project.')) core.handle({ type: 'removeProject', id: p!.id }); return;
       case 'project': { const x = pick(projects(), q => q.name, args[0] ?? ''); if (need(x, `No project matches "${args[0] ?? ''}".`)) { switchProject(projects().indexOf(x!) - pi); } return; }
       case 'next': nextNeeding(); scroll = 0; return;
       case 'shell': if (need(p, 'No project.')) shell(p!); return;
@@ -511,9 +643,9 @@ export async function tui(boardFile: string) {
       case 'reload': store.reload(); push(); return;
       case 'quit': return quit();
       case 'help':
-        live.print([sgr(BOLD, 'Commands'), ...COMMANDS.map(c => line([[`  /${fit(`${c.name}${c.args ? ` ${c.args}` : ''}`, 38)}`, ORANGE], [c.help + (c.view ? ` (${c.view} view)` : ''), DIM]], 100).trimEnd()),
-          '', sgr(BOLD, 'Keys'), ...[['↑ ↓', 'move through the list (empty prompt), history otherwise'], ['← →', 'previous / next project, or epic in the epics view'],
-            ['⏎', 'attach the selected task (empty prompt), or send'], ['\\⏎', 'new line'], ['shift+tab', 'switch view'], ['tab', 'complete / and @'],
+        live.print([sgr(BOLD, 'Commands'), ...COMMANDS.map(c => line([[`  /${fit(`${c.name}${c.args ? ` ${c.args}` : ''}`, 38)}`, ORANGE], [c.help + (c.views ? ` (${c.views.join(', ')})` : ''), DIM]], 100).trimEnd()),
+          '', sgr(BOLD, 'Keys'), ...[['↑ ↓', 'move through the list (empty prompt), history otherwise'], ['← →', 'project (tasks), column (board), epic (epics)'], ['shift+← →', 'board: move the task to the previous / next column'], ['space', 'peek at the selected task\'s transcript'],
+            ['⏎', 'attach the selected task (empty prompt), or send'], ['\\⏎', 'new line'], ['shift+tab', 'cycle views: tasks, board, epics, projects'], ['tab', 'complete / and @'],
             ['ctrl+g', 'edit the prompt in $EDITOR'], ['esc', 'clear the prompt'], ['ctrl+c', 'clear, then quit']].map(([k, h]) => `  ${sgr(ORANGE, fit(k, 12))}${sgr(DIM, h)}`)]);
         return;
     }
@@ -521,11 +653,17 @@ export async function tui(boardFile: string) {
     say('error', `Unknown command /${name}. /help lists them.`);
   }
 
+  const setView = (v: View) => { view = v; scroll = 0; if (v === 'projects') pj = pi; };
+  const openEpic = (id: string) => { selEpic = id; selRow = undefined; setView('epics'); };
+
   async function submit(text: string) {
     const p = project();
-    if (!text.trim()) { // empty prompt: ⏎ attaches
+    if (!text.trim()) { // empty prompt: ⏎ opens what's selected
       if (view === 'epics') { const a = epicKeys().a; if (a) await runAct(a); return; }
-      const s = selected();
+      if (view === 'projects') { switchProject(pj - pi); return setView('tasks'); }
+      const e = current();
+      if (e?.epic) return openEpic(e.epic.id);
+      const s = e?.story;
       if (s) attach(s, false);
       return;
     }
@@ -581,9 +719,10 @@ export async function tui(boardFile: string) {
     }
     if (!data) return;
     const m = menu();
-    if (key.name === 'escape') { if (a) return done(); pr.value = ''; return render(); }
+    if (key.name === 'escape') { if (a) return done(); if (!pr.value) peek = undefined; pr.value = ''; return render(); }
     if (key.ctrl && key.name === 'g') { editText(ed.value, 'Edit the prompt, then save and quit.').then(t => { if (t !== undefined) ed.value = t; render(); }); return; }
-    if (key.name === 'tab' && key.shift) { if (!a) { view = view === 'tasks' ? 'epics' : 'tasks'; scroll = 0; } return render(); }
+    if (key.name === 'tab' && key.shift) { if (!a) setView(VIEWS[(VIEWS.indexOf(view) + 1) % VIEWS.length]); return render(); }
+    if (str === ' ' && !ed.value && !a && (view === 'tasks' || view === 'board')) { const s = selected(); peek = peek || !s ? undefined : s.id; return render(); }
     if (key.name === 'tab') { if (m[menuAt]) ed.value = m[menuAt].fill; return render(); }
     if (key.name === 'return' || key.name === 'enter') {
       if (pasting || key.meta || ed.value.endsWith('\\')) { ed.value = ed.value.replace(/\\$/, '') + '\n'; return render(); }
@@ -598,12 +737,17 @@ export async function tui(boardFile: string) {
     if (key.name === 'up' || key.name === 'down') {
       const d = key.name === 'up' ? -1 : 1;
       if (m.length) menuAt += d;
-      else if (!ed.value && !a && hi === hist.length) { if (view === 'epics') epicStep(d); else step(d); }
+      else if (!ed.value && !a && hi === hist.length) { if (view === 'epics') epicStep(d); else if (view === 'projects') pj += d; else step(d); if (peek) peek = selected()?.id; }
       else if (!a && hist.length) { hi = Math.max(0, Math.min(hi + d, hist.length)); pr.value = hist[hi] ?? ''; }
       return render();
     }
     if (key.name === 'left' || key.name === 'right') {
-      if (!ed.value && !a) { const d = key.name === 'left' ? -1 : 1; if (view === 'epics') epicSwitch(d); else switchProject(d); }
+      const d = key.name === 'left' ? -1 : 1, s = selected();
+      if (ed.value || a) return render();
+      if (view === 'board' && key.shift) { const to = STATUSES[STATUSES.indexOf(s?.status as Status) + d]; if (s && to) core.handle({ type: 'status', id: s.id, status: to }); }
+      else if (view === 'board') boardCol(d);
+      else if (view === 'epics') epicSwitch(d);
+      else if (view === 'tasks') switchProject(d);
       return render();
     }
     if (key.name === 'backspace') ed.value = Array.from(ed.value).slice(0, -1).join('');

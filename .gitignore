@@ -3,3 +3,4 @@ out
 *.vsix
 .tmp/
 .playwright-mcp/
+graphify-out/

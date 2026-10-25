@@ -62,32 +62,37 @@ lexcode ui                                 # opens http://127.0.0.1:7420/?t=<tok
 
 ### Use in the terminal (`lexcode tui`)
 
-The board in your terminal. Attaching a card opens its Claude session in one pane on the right; the board stays live on the left.
+The board in your terminal, drawn like Claude Code: events print into the scrollback, and the task list, prompt box and status line stay live under them.
 
 ```sh
 lexcode          # same as `lexcode tui`
 ```
 
-- **Where Claude opens:**
+- **Prompt:** type a story and press `⏎` to add it to the current project. `/` opens the command menu (`tab` or `⏎` completes); `@` names a task, as in `/move review @login`. `\⏎` adds a line, `ctrl+g` edits the prompt in `$EDITOR`, `esc` clears it, `ctrl+c` clears, then quits. `/help` lists every command.
+- **Views** (`shift+tab` cycles, or `/tasks`, `/board`, `/epics`, `/projects`):
+  - **tasks:** the project's work grouped as Needs you (sessions asking for permission, epic gates), Running (with each run's latest action under it), Up next, Review, and a count of Done. `←`/`→` switch project.
+  - **board:** To do / Doing / Review / Done columns. Arrows move the highlight, `shift+←`/`shift+→` (or `/move done`) move the task. Under the board: the highlighted task's run and latest action. Below 100 columns it becomes one list grouped by status.
+  - **epics:** each factory epic's stage, then the selected epic's pipeline and sprints, with reviewers and blockers under them. `←`/`→` pick an epic, `↑`/`↓` move over its sprints. The status line lists the commands valid right now, the same actions as the dashboard's buttons:
+    - plan: `/plan`, `/plan-source`, `/approve`, `/changes`, `/reject`;
+    - build: `/start`, `/pause`, `/resume`, `/builders`, `/cancel`;
+    - sprint: `⏎` (or `/attach`) the running builder, reviewer or fix session, `/merge`, `/send-back`, `/retry`, `/skip`;
+    - PR: `/pr` (gh, tea, or a Claude skill), `/pr-opened` for the URL a skill opened, `/open-pr`.
+  - **projects:** every project with what needs you, what runs, task counts (to do/doing/review/done), active epics and the last Claude activity. `⏎` opens one.
+- **`⏎` on an empty prompt** opens what's selected: a task's Claude session, an epic, a project. `/attach --new` starts a fresh session. **`space`** peeks at the selected task's transcript without attaching (`space` or `esc` closes).
+- **Questions** show as numbered choices in a box (`↑`/`↓` and `⏎`, or the number; `esc` for later).
+- **`/epic`** asks the dashboard form's questions in turn: title, how builders run, description, target branch, models, reference files (comma-separated paths, at most 20 files of 25 MB). Nothing is created until you confirm; `esc` cancels.
+- **`/next`** jumps to the next thing waiting on you, in any project: a plan or PR gate, a merge to approve, a blocked sprint or story, or a session asking for permission.
+- **Where Claude opens** (until the planned in-window modal replaces it):
   - Inside **Neovim**'s `:terminal` (run `:terminal lexcode`): a vertical split in that Neovim.
   - Inside **tmux**: a pane split off on the right.
   - Plain terminal with tmux installed: `lexcode` starts (or reattaches to) a tmux session named `lexcode` and works as above.
-  - Otherwise Claude takes over the terminal and the board comes back when it exits.
+  - Otherwise Claude takes over the terminal and LexCode comes back when it exits.
   - Force one with `"lexCode.tui.terminal": "tmux" | "nvim" | "inline"` in `~/.lexcode/settings.json`.
-- **One Claude pane at a time.** Attaching another card parks the current pane, which keeps running: a hidden `⏸ <card>` window in tmux, a hidden buffer in Neovim. Attaching a parked card swaps its pane back in, so no second Claude starts on the same session. Cards show `▣ open`, `⏸ parked`, `◉ running`, `! approve`, or `↻` (has sessions). When Claude exits, its pane closes.
-- **Keys:** arrows or `hjkl` move, `⏎`/`a` attach, `c` new session, `H`/`L` move status, `n` new story, `d` delete, `[`/`]` switch project, `o` shell in the project, `A` add project, `i` import tasks, `tab` jump to the Claude pane, `?` all keys, `q` quit. Get back from Claude with your tmux prefix plus an arrow key, or `<C-\><C-n><C-w>h` in Neovim.
+  - One Claude pane at a time: attaching another task parks the current pane, which keeps running (`⏸ parked`), and attaching it again swaps it back in.
 - **Neovim:**
-  - `:LexCode` opens the board in a tab, or jumps back to it. Add the plugin with lazy.nvim `{ dir = '<LexCode repo>/nvim' }`, or put that folder on `runtimepath`. It runs `lexcode tui`, or the extension's bundled CLI when `lexcode` isn't installed.
-  - With [claudecode.nvim](https://github.com/coder/claudecode.nvim) running, Claude starts with `--ide`, so its edits open as Neovim diffs (`:ClaudeCodeDiffAccept` / `:ClaudeCodeDiffDeny`). This only happens when that Neovim is the one editor open on the project folder; with VS Code or Devin open on it too, Claude starts without `--ide` so it can't connect to the wrong one. If Neovim is on another folder, the board tells you to `:cd` there.
-- Below 100 columns (for example next to a Claude pane) the board becomes one list grouped by status.
-- **Factory epics:** `e` switches between the board and the project's epics. The screen shows each epic's stage, then the selected epic's pipeline and sprints, with reviewers and blockers under them. `h`/`l` pick an epic and `j`/`k` move over its sprints. The footer lists only the keys valid right now, the same actions as the dashboard's buttons:
-  - plan: `v` read it, `V` source, `y` approve, `C` request changes, `X` reject;
-  - build: `s` start, `p` pause or resume, `w` builders, `x` cancel;
-  - sprint: `a` attach the running builder, reviewer or fix session (`⏎` too), `m` approve merge, `b` send back, `R` retry, `S` skip a blocked story;
-  - PR: `P` create (gh, tea, or a Claude skill), `u` paste the URL a skill opened, `o` open the PR.
-- **`N` new factory epic** asks the dashboard form's questions on the bottom lines: title, how builders run, description, target branch, models, reference files (comma-separated paths, at most 20 files of 25 MB). Nothing is created until you confirm; `esc` cancels.
-- **`g`** jumps to the next thing waiting on you, in any project: a plan or PR gate, a merge to approve, a blocked sprint or story, or a session asking for permission.
-- **Long text** (epic description, plan changes, send-back notes) opens in `$VISUAL`/`$EDITOR` over the board: a tmux popup (tmux 3.2+), a floating window inside Neovim, or the whole terminal otherwise. Text below the `>8` line is help and is dropped; leave it empty to cancel. `v` shows the plan with `glow` if installed, else `less`.
+  - `:LexCode` opens LexCode in a tab, or jumps back to it. Add the plugin with lazy.nvim `{ dir = '<LexCode repo>/nvim' }`, or put that folder on `runtimepath`. It runs `lexcode tui`, or the extension's bundled CLI when `lexcode` isn't installed.
+  - With [claudecode.nvim](https://github.com/coder/claudecode.nvim) running, Claude starts with `--ide`, so its edits open as Neovim diffs (`:ClaudeCodeDiffAccept` / `:ClaudeCodeDiffDeny`). This only happens when that Neovim is the one editor open on the project folder; with VS Code or Devin open on it too, Claude starts without `--ide` so it can't connect to the wrong one. If Neovim is on another folder, LexCode tells you to `:cd` there.
+- **Long text** (epic description, plan changes, send-back notes) opens in `$VISUAL`/`$EDITOR`: a tmux popup (tmux 3.2+), a floating window inside Neovim, or the whole terminal otherwise. Text below the `>8` line is help and is dropped; leave it empty to cancel. `/plan` shows the plan with `glow` if installed, else `less`.
 - Shares `board.json`, settings, and factory locks with VS Code and `lexcode ui`. The factory advances while any of them runs; quitting one hands its epics to the others at once.
 - Logs go to `~/.lexcode/tui.log`.
 

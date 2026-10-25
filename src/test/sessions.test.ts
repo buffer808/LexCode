@@ -92,3 +92,23 @@ test('turnEnded: finished turn vs waiting mid-turn on a permission prompt', () =
   assert.equal(turnEnded('/p', 's', home), false);
   assert.equal(turnEnded('/p', 'missing', home), false);
 });
+
+test('transcriptTail turns a session into Claude Code style steps, main thread only', () => {
+  const { transcriptTail, sessionDir } = require('../sessions') as typeof import('../sessions');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lexcode-tail-'));
+  const dir = sessionDir('/w/app', home);
+  fs.mkdirSync(dir, { recursive: true });
+  const rows = [
+    { type: 'user', message: { content: 'Fix the login redirect' } },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'Looking.\nmore' }, { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test\n# x' } }] } },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok\n3 passing\n' }] } },
+    { type: 'assistant', isSidechain: true, message: { content: [{ type: 'text', text: 'subagent' }] } },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't2', is_error: true, content: [{ type: 'text', text: 'denied' }] }] } },
+  ];
+  fs.writeFileSync(path.join(dir, 's1.jsonl'), rows.map(r => JSON.stringify(r)).join('\n') + '\n{"partial');
+  assert.deepStrictEqual(transcriptTail('/w/app', 's1', 10, home), [
+    { kind: 'user', text: 'Fix the login redirect' }, { kind: 'say', text: 'Looking.' }, { kind: 'tool', text: 'Bash(npm test)' },
+    { kind: 'result', text: 'ok (+1 lines)' }, { kind: 'error', text: 'denied' }]);
+  assert.strictEqual(transcriptTail('/w/app', 's1', 1, home)[0].text, 'denied');
+  assert.deepStrictEqual(transcriptTail('/w/app', 'missing', 5, home), []);
+});

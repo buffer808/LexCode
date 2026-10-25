@@ -114,3 +114,46 @@ export function editedFiles(projectPath: string, sessionIds: string[], home?: st
   }
   return [...byFile.values()].sort((a, b) => b.last - a.last);
 }
+
+export interface Step { kind: 'say' | 'tool' | 'result' | 'error' | 'user'; text: string }
+
+// The tool call's main argument, as Claude Code shows it: Bash(npm test), Read(src/a.ts).
+const toolArg = (input: any) => {
+  if (!input || typeof input !== 'object') return '';
+  const v = input.command ?? input.file_path ?? input.notebook_path ?? input.pattern ?? input.url ?? input.description ?? input.prompt
+    ?? Object.values(input).find(x => typeof x === 'string');
+  return typeof v === 'string' ? v.split('\n')[0] : '';
+};
+const resultText = (c: any) => {
+  const t = typeof c.content === 'string' ? c.content : Array.isArray(c.content) ? c.content.filter((x: any) => x.type === 'text').map((x: any) => x.text).join('\n') : '';
+  const lines = t.split('\n').filter((l: string) => l.trim());
+  return lines.length > 1 ? `${lines[0]} (+${lines.length - 1} lines)` : lines[0] ?? '(no output)';
+};
+
+// The last n steps of a session (main thread only), for peeking at a run and its latest action.
+// ponytail: reads the last 256KB only; very long tool results can push older steps out of the window.
+export function transcriptTail(projectPath: string, sessionId: string, n: number, home?: string): Step[] {
+  let tail: string;
+  try {
+    const fd = fs.openSync(path.join(sessionDir(projectPath, home), sessionId + '.jsonl'), 'r');
+    try {
+      const size = fs.fstatSync(fd).size, len = Math.min(size, 262144), buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, size - len);
+      tail = buf.toString('utf8');
+    } finally { fs.closeSync(fd); }
+  } catch { return []; }
+  const steps: Step[] = [];
+  for (const line of tail.split('\n')) {
+    let r: any;
+    try { r = JSON.parse(line); } catch { continue; } // the cut first line, or a partial last one
+    if (r.isSidechain || r.isMeta || (r.type !== 'assistant' && r.type !== 'user')) continue;
+    const c = r.message?.content;
+    if (typeof c === 'string') { if (r.type === 'user' && !c.startsWith('<')) steps.push({ kind: 'user', text: c.split('\n')[0] }); continue; }
+    for (const x of Array.isArray(c) ? c : []) {
+      if (x.type === 'text' && x.text?.trim() && !x.text.startsWith('<')) steps.push({ kind: r.type === 'user' ? 'user' : 'say', text: x.text.trim().split('\n')[0] });
+      else if (x.type === 'tool_use') steps.push({ kind: 'tool', text: `${x.name}(${toolArg(x.input)})` });
+      else if (x.type === 'tool_result') steps.push({ kind: x.is_error ? 'error' : 'result', text: resultText(x) });
+    }
+  }
+  return steps.slice(-n);
+}
