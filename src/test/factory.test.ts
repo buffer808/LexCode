@@ -47,7 +47,7 @@ test('stage prompt and args', () => {
   assert.match(stagePrompt('planning', e, { plan, feedback: 'smaller stories', collaborators: [] }), /Revise the plan[\s\S]*## Human feedback\nsmaller stories/);
 
   const args = stageArgs('planning', e, 'PROMPT', {}, agent('lead'));
-  assert.deepEqual(args, ['--disallowedTools', 'ExitPlanMode', '--permission-mode', 'plan', '--agent', 'lead',
+  assert.deepEqual(args, ['--disallowedTools', 'ExitPlanMode', 'Write', 'Edit', 'NotebookEdit', '--permission-mode', 'plan', '--agent', 'lead',
     '--model', 'opus', '--effort', 'high', '-n', 'LexCode · Health · Planning', 'PROMPT']);
   const resume = stageArgs('securityCheck', e, 'FIX', {}, undefined, 'sid');
   assert.deepEqual(resume.slice(-3), ['--resume', 'sid', 'FIX']);
@@ -232,7 +232,7 @@ test('builder/reviewer prompts and args', () => {
   assert.deepEqual(sessionArgs(e, 'builder', 'P', {}, { mode: 'auto', agent: agent('dev'), extra: ['--settings', '{}'], name: 'n' }),
     ['--disallowedTools', 'EnterWorktree', 'ExitWorktree', '--permission-mode', 'auto', '--agent', 'dev', '--settings', '{}', '-n', 'n', 'P']);
   assert.deepEqual(sessionArgs(e, 'reviewer', 'P', { reviewer: { model: 'sonnet' } }, { mode: 'plan', extra: [], resumeId: 'sid' }),
-    ['--disallowedTools', 'ExitPlanMode', 'EnterWorktree', 'ExitWorktree', '--permission-mode', 'plan', '--model', 'sonnet', '--resume', 'sid', 'P']);
+    ['--disallowedTools', 'ExitPlanMode', 'Write', 'Edit', 'NotebookEdit', 'EnterWorktree', 'ExitWorktree', '--permission-mode', 'plan', '--model', 'sonnet', '--resume', 'sid', 'P']);
 
   assert.equal(epicBranch(epic({ title: 'Add /health — v2!' })), 'lexcode/add-health-v2-e1');
   assert.equal(sprintBranch(building(), sp('S1', { key: 'S 1' })), 'lexcode/health-e1--s-1');
@@ -255,3 +255,21 @@ function agentFile(dir: string, file: string, fm: string) {
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, file), `---\n${fm}\n---\nbody`);
 }
+
+import { epicRefs, refArgs } from '../factory';
+
+test('epic reference files: listed in every prompt, readable via a leading --add-dir', () => {
+  const e = epic({ attachments: [{ id: 'a1', name: 'mock.png', file: 'a1-mock.png', mime: 'image/png' }] });
+  const refs = epicRefs(e, '/att/e1');
+  assert.deepEqual(refs, [path.join('/att/e1', 'a1-mock.png')]);
+  assert.match(stagePrompt('planning', e, { collaborators: [], refs }), /## Reference files from the human[\s\S]*- \/att\/e1\/a1-mock\.png/);
+  const sp = { id: 's', projectId: 'p1', name: 'S1', active: false, branch: 'b' };
+  const st = { id: 't', projectId: 'p1', title: 'T', status: 'todo' as const };
+  for (const p of [builderPrompt(e, sp, st, { collaborators: [], projectPath: '/p', refs }), reviewPrompt(e, sp, st, '', { collaborators: [], projectPath: '/p', refs }),
+    sprintReviewPrompt(e, sp, [st], '', 'reviewer', { collaborators: [], projectPath: '/p', refs })]) assert.match(p, /a1-mock\.png/);
+  assert.doesNotMatch(stagePrompt('planning', epic(), { collaborators: [] }), /Reference files/);
+  // --add-dir is variadic: it must come first, followed by an option, never right before the prompt.
+  const args = [...refArgs(e, '/att/e1'), ...stageArgs('planning', e, 'PROMPT', {})];
+  assert.deepEqual(args.slice(0, 3), ['--add-dir', '/att/e1', '--disallowedTools']);
+  assert.deepEqual(refArgs(epic(), '/att/e1'), []);
+});

@@ -2,7 +2,7 @@
   "name": "lex-code",
   "displayName": "LexCode",
   "description": "Agile project manager for concurrent projects with Claude Code sessions",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "publisher": "lex",
   "icon": "media/icon.png",
   "repository": {
@@ -13,8 +13,12 @@
     "vscode": "^1.90.0"
   },
   "main": "./out/extension.js",
+  "bin": {
+    "lexcode": "out/cli.js"
+  },
   "activationEvents": [
-    "onWebviewPanel:lexCode.dashboard"
+    "onWebviewPanel:lexCode.dashboard",
+    "onUri"
   ],
   "contributes": {
     "viewsContainers": {
@@ -469,12 +473,21 @@
   "scripts": {
     "compile": "tsc -p .",
     "watch": "tsc -watch -p .",
-    "test": "tsc -p . && node --test out/test/*.test.js"
+    "test": "tsc -p . && node --test out/test/*.test.js",
+    "prepare": "tsc -p ."
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.90.0",
+    "@types/ws": "^8.18.2",
     "typescript": "^5.4.0"
   },
-  "license": "UNLICENSED"
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/headless": "^5.5.0",
+    "@xterm/xterm": "^5.5.0",
+    "node-pty": "^1.1.0",
+    "ws": "^8.22.0"
+  }
 }

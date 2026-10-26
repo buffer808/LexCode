@@ -3,7 +3,9 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { Store, Project, Status } from './store';
 import { BoardTree, Node } from './tree';
-import { resumeSession, openStorySession, startSession, AgentWatcher, attach, liveRun } from './claude';
+import { resumeSession, claudeStory, startSession, AgentWatcher, attach, liveRun } from './claude';
+import { setHost } from './host';
+import { vscodeHost } from './vscodeHost';
 import { showDashboard } from './dashboard';
 import { FactoryRunner } from './factoryRunner';
 import { parseEpicInput, validBranch, EFFORTS } from './factory';
@@ -12,6 +14,8 @@ import { findTasksFile, parseTasks, importInto, reviewPrompt, syncSource, syncFr
 const statuses: Status[] = ['todo', 'doing', 'review', 'done'];
 
 export function activate(context: vscode.ExtensionContext) {
+  const log = vscode.window.createOutputChannel('LexCode');
+  setHost({ ...vscodeHost(log), showDashboard: () => vscode.commands.executeCommand('lexCode.dashboard') });
   const store = new Store(path.join(context.globalStorageUri.fsPath, 'board.json'), s => {
     try { if (s.source && !syncSource(s)) vscode.window.showWarningMessage(`Couldn't find "${s.title}" in ${path.basename(s.source.file)} to update its checkbox`); }
     catch (e: any) { vscode.window.showWarningMessage(`Couldn't update ${s.source!.file}: ${e.message}`); }
@@ -110,7 +114,8 @@ export function activate(context: vscode.ExtensionContext) {
   };
 
   // Asks how the factory should run a new epic and starts planning. existing: turn a manual epic into a factory epic.
-  const factoryEpic = async (p: Project, title: string, existingId?: string) => {
+  // prefill: description from the /lexcode-factory skill, shown for the user to edit.
+  const factoryEpic = async (p: Project, title: string, existingId?: string, prefill?: string) => {
     const cfg = vscode.workspace.getConfiguration('lexCode.factory');
     const modes = [
       { label: '$(shield) Accept edits', detail: 'Builders auto-approve file edits and pause for shell command approvals', mode: 'acceptEdits' },
@@ -122,7 +127,7 @@ export function activate(context: vscode.ExtensionContext) {
       { ...opts, placeHolder: `${title}: how should builder agents run?` });
     if (!pick) return;
     if (!pick.mode) return store.add('epics', { projectId: p.id, title });
-    const description = await vscode.window.showInputBox({ ...opts, prompt: `Describe "${title}" for the orchestrator: goal, constraints, acceptance criteria` });
+    const description = await vscode.window.showInputBox({ ...opts, prompt: `Describe "${title}" for the orchestrator: goal, constraints, acceptance criteria`, value: prefill });
     if (description === undefined) return;
     const targetBranch = await vscode.window.showInputBox({ ...opts, prompt: 'Target branch: the epic branch is cut from it, and the PR goes back into it', value: cfg.get('targetBranch', 'main'),
       validateInput: v => validBranch(v.trim()) ? undefined : 'Not a valid branch name' });
@@ -145,13 +150,33 @@ export function activate(context: vscode.ExtensionContext) {
     catch (e: any) { return vscode.window.showErrorMessage(e.message); }
     const lead = epic.roleAgents?.orchestrator;
     vscode.window.showInformationMessage(`Planning "${title}" with ${lead ? `your ${lead} agent` : 'the LexCode orchestrator'}. You'll be asked to approve the plan.`);
+    return epic;
+  };
+
+  // vscode://lex.lex-code/factory?<base64url JSON {path, title, description}> (the /lexcode-factory skill opens it).
+  // Base64: VS Code hands over uri.query already percent-decoded, so an & in a title would break key=value parsing.
+  // The user still confirms everything in the usual prompts, so the link can't start builders on its own.
+  const handleUri = async (uri: vscode.Uri) => {
+    if (uri.path !== '/factory') return vscode.window.showErrorMessage(`LexCode: unknown link ${uri.path}`);
+    let q: { path?: string; title?: string; description?: string };
+    try { q = JSON.parse(Buffer.from(uri.query, 'base64url').toString()); }
+    catch { return vscode.window.showErrorMessage('LexCode: malformed factory link'); }
+    const dir = path.resolve(q.path ?? ''), title = q.title?.trim();
+    if (!title) return vscode.window.showErrorMessage('LexCode: factory link has no epic title');
+    store.reload();
+    const p = store.projectFor(dir);
+    if (!p) return vscode.window.showErrorMessage(`LexCode: ${dir} is not a LexCode project. Add it from the Board (+) first.`);
+    // Opened from outside the editor: show the dashboard so the new epic's progress is visible.
+    if (await factoryEpic(p, title, undefined, q.description)) showDashboard(context, store, tree, agents, factory);
+    tree.refresh();
   };
 
   const cmd = (id: string, fn: (...args: any[]) => unknown) =>
     vscode.commands.registerCommand(id, async (...args) => { await fn(...args); tree.refresh(); });
 
   context.subscriptions.push(
-    watcher, agents, factory,
+    watcher, log, agents, factory,
+    vscode.window.registerUriHandler({ handleUri: u => { handleUri(u); } }),
     vscode.window.createTreeView('lexCode.board', { treeDataProvider: tree }),
 
     cmd('lexCode.refresh', () => {}),
@@ -300,17 +325,7 @@ export function activate(context: vscode.ExtensionContext) {
     }),
 
     cmd('lexCode.claudeStory', async (node: Node, forceNew = false) => {
-      if (node.kind !== 'story') return;
-      const project = store.all().projects.find(p => p.id === node.story.projectId);
-      if (!project) return;
-      const sessionId = await openStorySession(project, node.story, store.attachmentsDir(node.story.id), forceNew);
-      if (!sessionId) return;
-      // Re-read: the extension path polls for up to 2 min while the story may have changed.
-      store.reload();
-      const story = store.all().stories.find(s => s.id === node.story.id);
-      if (story) store.update('stories', story.id, {
-        sessionIds: [...new Set([...(story.sessionIds ?? []), sessionId])],
-        status: story.status === 'todo' ? 'doing' : story.status });
+      if (node.kind === 'story') await claudeStory(store, node.story, forceNew);
     }),
 
     cmd('lexCode.deleteItem', async (node: Node) => {

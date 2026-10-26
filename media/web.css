@@ -1,0 +1,50 @@
+/* lexcode ui: stand-ins for the VS Code theme variables dashboard.css uses, plus browser-only bits. */
+:root {
+  --vscode-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --vscode-editor-font-family: Menlo, Monaco, "Cascadia Mono", monospace;
+  --vscode-foreground: #1f2328; --vscode-descriptionForeground: #656d76; --vscode-errorForeground: #cf222e;
+  --vscode-editor-background: #ffffff; --vscode-sideBar-background: #f6f8fa; --vscode-editorWidget-background: #f6f8fa;
+  --vscode-panel-border: #d0d7de; --vscode-focusBorder: #0969da; --vscode-textLink-foreground: #0969da;
+  --vscode-button-background: #0969da; --vscode-button-foreground: #ffffff; --vscode-button-hoverBackground: #0860ca;
+  --vscode-button-secondaryBackground: #e7ebef; --vscode-button-secondaryForeground: #1f2328; --vscode-button-secondaryHoverBackground: #d8dee4;
+  --vscode-input-background: #ffffff; --vscode-input-foreground: #1f2328; --vscode-input-border: #d0d7de;
+  --vscode-dropdown-background: #ffffff; --vscode-dropdown-foreground: #1f2328; --vscode-dropdown-border: #d0d7de;
+  --vscode-badge-background: #e7ebef; --vscode-badge-foreground: #1f2328;
+  --vscode-charts-blue: #0969da; --vscode-charts-green: #1a7f37; --vscode-charts-yellow: #9a6700; --vscode-editorWarning-foreground: #9a6700;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --vscode-foreground: #cccccc; --vscode-descriptionForeground: #9d9d9d; --vscode-errorForeground: #f48771;
+    --vscode-editor-background: #1e1e1e; --vscode-sideBar-background: #252526; --vscode-editorWidget-background: #252526;
+    --vscode-panel-border: #3c3c3c; --vscode-focusBorder: #0078d4; --vscode-textLink-foreground: #3794ff;
+    --vscode-button-background: #0e639c; --vscode-button-foreground: #ffffff; --vscode-button-hoverBackground: #1177bb;
+    --vscode-button-secondaryBackground: #3a3d41; --vscode-button-secondaryForeground: #cccccc; --vscode-button-secondaryHoverBackground: #45494e;
+    --vscode-input-background: #3c3c3c; --vscode-input-foreground: #cccccc; --vscode-input-border: #3c3c3c;
+    --vscode-dropdown-background: #3c3c3c; --vscode-dropdown-foreground: #cccccc; --vscode-dropdown-border: #3c3c3c;
+    --vscode-badge-background: #4d4d4d; --vscode-badge-foreground: #ffffff;
+    --vscode-charts-blue: #3794ff; --vscode-charts-green: #89d185; --vscode-charts-yellow: #cca700; --vscode-editorWarning-foreground: #cca700;
+  }
+}
+body { font-size: 13px; }
+#toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; max-width: min(420px, calc(100vw - 32px)); z-index: 10; }
+.toast { background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-panel-border); border-left: 3px solid var(--vscode-charts-blue);
+  border-radius: 6px; padding: 10px 12px; box-shadow: 0 4px 16px rgb(0 0 0 / .2); }
+.toast.warn { border-left-color: var(--vscode-editorWarning-foreground); }
+.toast.error { border-left-color: var(--vscode-errorForeground); }
+.toast p, #host-ask p { margin: 0 0 8px; white-space: pre-wrap; }
+.toast .acts, #host-ask .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+#host-ask { max-width: 480px; color: inherit; background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 8px; }
+#host-ask .detail { color: var(--vscode-descriptionForeground); }
+#host-ask input { width: 100%; box-sizing: border-box; margin-bottom: 10px; padding: 6px; color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border); border-radius: 4px; font: inherit; }
+#offline { position: fixed; top: 0; left: 0; right: 0; padding: 6px; text-align: center; background: var(--vscode-editorWarning-foreground); color: #000; }
+body.term { margin: 0; padding: 0; max-width: none; height: 100vh; background: #1e1e1e; }
+body.term #t { height: 100vh; padding: 4px; box-sizing: border-box; }
+#md-view { width: min(900px, calc(100vw - 32px)); max-height: calc(100vh - 64px); padding: 0; color: inherit; background: var(--vscode-editor-background);
+  border: 1px solid var(--vscode-panel-border); border-radius: 8px; flex-direction: column; }
+#md-view[open] { display: flex; }
+#md-view header { display: flex; align-items: center; gap: 6px; padding: 10px 14px; border-bottom: 1px solid var(--vscode-panel-border); }
+#md-view header .spacer { flex: 1; }
+#md-view header button.on { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+#md-view .md-body { overflow: auto; padding: 4px 20px 20px; }

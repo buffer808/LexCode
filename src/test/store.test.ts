@@ -58,3 +58,13 @@ test('remove project keeping tasks restores them on re-add of same path', () => 
   st.add('projects', { name: 'x', path: '/x' });
   assert.equal(st.all().stories.length, 0); // archive consumed; plain remove deletes
 });
+
+test('removing an epic deletes its attachment folder', () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'lex-')), 'board.json');
+  const st = new Store(file);
+  const e = st.add('epics', { projectId: 'p', title: 'e' });
+  fs.mkdirSync(st.attachmentsDir(e.id), { recursive: true });
+  fs.writeFileSync(path.join(st.attachmentsDir(e.id), 'x.png'), 'x');
+  st.remove('epics', e.id);
+  assert.equal(fs.existsSync(st.attachmentsDir(e.id)), false);
+});

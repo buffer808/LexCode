@@ -42,12 +42,25 @@ const PLAN_SCHEMA = `{
   "security": [{ "severity": "low|medium|high", "sprint": "S1", "story": "story title", "finding": "risk and how to prevent it" }]
 }`;
 
+// Read-only (plan-mode) sessions hand back their result as reply text. Plan mode tells Claude to write a plan file and
+// exit plan mode; with those tools gone it can only answer in the reply, which is what the factory reads.
+const PLAN_MODE_DENY = ['ExitPlanMode', 'Write', 'Edit', 'NotebookEdit'];
+const READ_ONLY_OUTPUT = 'You are running unattended in read-only plan mode: do not ask questions, do not try to exit plan mode, and do not write a plan file or any other file. ' +
+  'The factory reads only your final reply text.';
+
 export interface StageContext {
+  refs?: string[];           // absolute paths of the epic's reference files (epicRefs)
   plan?: Plan;               // current plan (revalidate/security, or planning after "request changes")
   feedback?: string;         // human feedback from the plan gate
   roleBody?: string;         // bundled role prompt when no project agent is mapped
   collaborators: AgentDef[]; // every discovered agent, offered for delegation
 }
+
+// Epic attachments (screenshots, mockups) for every factory session. The folder sits outside the project: pass `args` too.
+export const epicRefs = (e: Epic, attachDir: string) => (e.attachments ?? []).map(a => path.join(attachDir, a.file));
+const refList = (refs?: string[]) => refs?.length ? `## Reference files from the human\nScreenshots, mockups or docs of what this epic should achieve. Open each one (Read tool) before you start:\n${refs.map(r => `- ${r}`).join('\n')}` : '';
+// Goes first: --add-dir is variadic, so the option after it must not be the prompt.
+export const refArgs = (e: Epic, attachDir: string) => e.attachments?.length ? ['--add-dir', attachDir] : [];
 
 export function stagePrompt(stage: EpicStage, epic: Epic, ctx: StageContext): string {
   const task: Record<string, string> = {
@@ -58,12 +71,12 @@ export function stagePrompt(stage: EpicStage, epic: Epic, ctx: StageContext): st
   const others = ctx.collaborators.filter(a => a.name !== epic.roleAgents?.[STAGE_ROLE[stage]!]);
   return [
     ctx.roleBody,
-    `# Epic: ${epic.title}`, epic.description,
+    `# Epic: ${epic.title}`, epic.description, refList(ctx.refs),
     `## Task\n${task[stage]}`,
     ctx.plan && `## Current plan\n\`\`\`json\n${JSON.stringify(ctx.plan, null, 2)}\n\`\`\``,
     ctx.feedback && `## Human feedback\n${ctx.feedback}`,
     others.length && `## Available project subagents\nDelegate to these where their expertise fits:\n${others.map(a => `- ${a.name}: ${a.description || '(no description)'}`).join('\n')}`,
-    `## Output\nYou are running unattended in read-only plan mode: do not ask questions and do not try to exit plan mode. ` +
+    `## Output\n${READ_ONLY_OUTPUT} ` +
     `Make reasonable assumptions and state them in \`summary\`. End your final message with exactly one \`\`\`json block in this shape:\n\`\`\`json\n${PLAN_SCHEMA}\n\`\`\``,
   ].filter(Boolean).join('\n\n');
 }
@@ -72,7 +85,7 @@ export function stagePrompt(stage: EpicStage, epic: Epic, ctx: StageContext): st
 export function stageArgs(stage: EpicStage, epic: Epic, prompt: string, settings: Partial<Record<ModelRole, ModelChoice>>, agent?: AgentDef, resumeId?: string, extra: string[] = []): string[] {
   const role = STAGE_ROLE[stage]!;
   // --disallowedTools is variadic: keep an option right after it so it can't swallow the prompt.
-  return ['--disallowedTools', 'ExitPlanMode', '--permission-mode', 'plan',
+  return ['--disallowedTools', ...PLAN_MODE_DENY, '--permission-mode', 'plan',
     ...(agent ? ['--agent', agent.name] : []), ...modelArgs(epic, role, settings, agent), ...extra,
     ...(resumeId ? ['--resume', resumeId] : ['-n', `LexCode · ${epic.title} · ${STAGE_LABEL[stage]}`]), prompt];
 }
@@ -124,6 +137,17 @@ export function tryLock(file: string, owner: string, staleMs = 60_000, now = Dat
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify({ owner, at: now }));
   return JSON.parse(fs.readFileSync(file, 'utf8')).owner === owner;
+}
+
+export function releaseLock(file: string, owner: string) {
+  try { if (JSON.parse(fs.readFileSync(file, 'utf8')).owner === owner) fs.unlinkSync(file); } catch { /* gone or corrupt */ }
+}
+
+// On shutdown: delete the locks this owner holds so another window takes over now, not after staleMs.
+export function releaseLocks(dir: string, owner: string) {
+  let files: string[] = [];
+  try { files = fs.readdirSync(dir).filter(f => f.endsWith('.lock')); } catch { return; }
+  for (const f of files) releaseLock(path.join(dir, f), owner);
 }
 
 /* ---------- new epic input (dashboard form / command); webview input is untrusted ---------- */
@@ -253,7 +277,7 @@ const collaboratorList = (agents: AgentDef[], self?: string) => {
 };
 export const commitMessage = (s: Story) => `story(${s.id.slice(0, 8)}): ${s.title}`;
 
-export interface BuildContext { roleBody?: string; collaborators: AgentDef[]; projectPath: string }
+export interface BuildContext { roleBody?: string; collaborators: AgentDef[]; projectPath: string; refs?: string[] }
 
 export function builderPrompt(e: Epic, sp: Sprint, s: Story, ctx: BuildContext): string {
   // .lexcode/ is git-excluded, so it isn't in the worktree: the plan file stays out of the builder's reading list.
@@ -262,7 +286,7 @@ export function builderPrompt(e: Epic, sp: Sprint, s: Story, ctx: BuildContext):
     ctx.roleBody,
     `# Story: ${s.title}`, s.description,
     refs.length && `Related files (read them first):\n${refs.map(r => `- ${r}`).join('\n')}`,
-    `## Context\nEpic: ${e.title}${e.description ? `\n${e.description}` : ''}\nSprint: ${sp.name}`,
+    `## Context\nEpic: ${e.title}${e.description ? `\n${e.description}` : ''}\nSprint: ${sp.name}`, refList(ctx.refs),
     collaboratorList(ctx.collaborators, e.roleAgents?.builder),
     `## Rules\nYou work unattended. Your current directory already is a git worktree on branch \`${sp.branch}\`: work here, do not create or enter other worktrees. Do not switch branches, push, merge or rebase. ` +
     `Implement only this story, add or update tests, run the tests, then commit all your changes with the message \`${commitMessage(s)}\`. ` +
@@ -274,13 +298,13 @@ export const fixPrompt = (s: Story, issues: string[]) =>
   `The reviewer rejected your work on "${s.title}". Fix every issue below, rerun the tests, and commit with the message \`${commitMessage(s)} (fix)\`.\n\n${issues.map(i => `- ${i}`).join('\n')}`;
 
 const VERDICT_SCHEMA = `{ "pass": true, "risk": "minor|critical", "issues": ["specific, actionable problem (file:line, what to change)"] }`;
-const verdictRules = `## Output\nYou are running unattended in read-only plan mode: do not ask questions and do not try to exit plan mode. ` +
+const verdictRules = `## Output\n${READ_ONLY_OUTPUT} ` +
   `End your final message with exactly one \`\`\`json block:\n\`\`\`json\n${VERDICT_SCHEMA}\n\`\`\`\n` +
   `A failing verdict must list issues. Use risk "critical" for security-sensitive code, migrations, public API/config changes, or anything you are unsure is safe to merge.`;
 
 export function reviewPrompt(e: Epic, sp: Sprint, s: Story, diff: string, ctx: BuildContext): string {
   return [ctx.roleBody, `# Review story: ${s.title}`, s.description,
-    `Epic: ${e.title} · Sprint: ${sp.name} · Branch: \`${sp.branch}\``,
+    `Epic: ${e.title} · Sprint: ${sp.name} · Branch: \`${sp.branch}\``, refList(ctx.refs),
     `## Diff (${s.baseCommit?.slice(0, 8)}...HEAD)\n\`\`\`diff\n${clip(diff, s.baseCommit ?? '')}\n\`\`\``,
     collaboratorList(ctx.collaborators, e.roleAgents?.reviewer), verdictRules].filter(Boolean).join('\n\n');
 }
@@ -303,7 +327,7 @@ export const reviewLabel = (r: SprintReview) => r.agent ?? `LexCode ${r.lens}`;
 
 export function sprintReviewPrompt(e: Epic, sp: Sprint, stories: Story[], diff: string, lens: Lens, ctx: BuildContext & { self?: string }): string {
   return [ctx.roleBody, `# ${LENS_LABEL[lens]} sprint: ${sp.name}`,
-    `Epic: ${e.title}${e.description ? `\n${e.description}` : ''}`,
+    `Epic: ${e.title}${e.description ? `\n${e.description}` : ''}`, refList(ctx.refs),
     `You are one of several reviewers of this sprint before it merges into \`${e.branch}\`. ${LENS_TASK[lens]}`,
     `## Stories\n${stories.map(s => `- ${s.title}`).join('\n')}`,
     `## Diff (${e.branch}...${sp.branch})\n\`\`\`diff\n${clip(diff, e.branch ?? '')}\n\`\`\``,
@@ -347,7 +371,7 @@ const NO_WORKTREE_TOOLS = ['EnterWorktree', 'ExitWorktree'];
 export interface SessionArgs { mode: string; agent?: AgentDef; extra: string[]; name?: string; resumeId?: string }
 // Args for builder/reviewer sessions (launchBackground adds --bg). Reviewers are read-only.
 export function sessionArgs(e: Epic, role: Role, prompt: string, settings: Partial<Record<ModelRole, ModelChoice>>, a: SessionArgs): string[] {
-  return ['--disallowedTools', ...(a.mode === 'plan' ? ['ExitPlanMode'] : []), ...NO_WORKTREE_TOOLS, '--permission-mode', a.mode,
+  return ['--disallowedTools', ...(a.mode === 'plan' ? PLAN_MODE_DENY : []), ...NO_WORKTREE_TOOLS, '--permission-mode', a.mode,
     ...(a.agent ? ['--agent', a.agent.name] : []), ...modelArgs(e, role, settings, a.agent), ...a.extra,
     ...(a.resumeId ? ['--resume', a.resumeId] : a.name ? ['-n', a.name] : []), prompt];
 }
