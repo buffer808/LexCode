@@ -20,7 +20,7 @@ import { Act, SCISSORS, cutHelp, epicNeeds, epicView, pipeline, progress } from 
 import { validBranch } from './factory';
 import { launcher, cliProjects, opener, onPath, terminalTab } from './server';
 import { HOME, setting } from './config';
-import { Step, sessionDir, transcriptTail } from './sessions';
+import { Session, Step, editedFiles, sessionDir, transcriptTail } from './sessions';
 import { Live, Seg, box, fit, line, sgr, width, SPIN, ORANGE, DIM, GREEN, YELLOW, RED, BOLD } from './render';
 import { COMMANDS, VIEWS, View, complete, epicCommand, parse, pick } from './commands';
 export { fit };
@@ -114,7 +114,7 @@ export async function tui(boardFile: string) {
 
   const store = new Store(boardFile, s => { try { if (s.source) syncSource(s); } catch (e: any) { host.log(e.message); } });
   const agents = new AgentWatcher(store);
-  let data: { board: Board; agents: Record<string, Agent>; factory: {
+  let data: { board: Board; sessions: Record<string, Session[]>; agents: Record<string, Agent>; factory: {
     plans: Record<string, string>; stages: Record<string, string>; skills: Record<string, string[]>; efforts: string[];
     targetBranch: string; builderMode: string; workers: number; roleAgents: Record<string, { roles: Record<string, string> }>;
   } } | undefined;
@@ -150,7 +150,8 @@ export async function tui(boardFile: string) {
   // Tasks and board views: 's:<story id>' or (tasks only) 'e:<epic id>'. The cursor follows the item as it changes group.
   let sel: string | undefined;
   let view: View = 'tasks';
-  let peek: string | undefined; // story whose transcript shows under the list
+  let peek: string | undefined; // story whose details (sessions, task files, a transcript) show under the list
+  let prow = 0; // highlighted row in those details
   const projects = () => data?.board.projects ?? [];
   const project = () => projects()[Math.min(pi, projects().length - 1)];
   const stories = () => (data?.board.stories ?? []).filter(s => s.projectId === project()?.id && !s.archived);
@@ -266,15 +267,19 @@ export async function tui(boardFile: string) {
 
   /* ---------- transcripts: latest action and peek ---------- */
   const tails = new Map<string, { m: number; steps: Step[] }>();
-  function tail(s: Story, n: number): Step[] {
-    const sid = runOf(s)?.sessionId ?? storySessions(s).at(-1);
+  function tail(s: Story, n: number, sid = runOf(s)?.sessionId ?? storySessions(s).at(-1)): Step[] {
     const p = data!.board.projects.find(x => x.id === s.projectId);
     if (!sid || !p) return [];
-    let m: number;
-    try { m = fs.statSync(path.join(sessionDir(p.path), `${sid}.jsonl`)).mtimeMs; } catch { return []; }
+    // Factory sessions run in the sprint worktree, so their transcripts are filed under it.
+    const wt = data!.board.sprints.find(x => x.id === s.sprintId)?.worktree;
+    let m = -1, dir = p.path;
+    for (const d of wt ? [p.path, wt] : [p.path]) {
+      try { m = fs.statSync(path.join(sessionDir(d), `${sid}.jsonl`)).mtimeMs; dir = d; break; } catch {}
+    }
+    if (m < 0) return [];
     const k = `${sid}:${n}`, c = tails.get(k);
     if (c?.m === m) return c.steps;
-    const steps = transcriptTail(p.path, sid, n);
+    const steps = transcriptTail(dir, sid, n);
     tails.set(k, { m, steps });
     return steps;
   }
@@ -439,9 +444,71 @@ export async function tui(boardFile: string) {
     const left = [line([[p?.name ?? '', BOLD], [`  ${view}`, DIM]], L), ...items.slice(scroll, scroll + room).map(i => line(i.segs, L))];
     live.draw([...framed.map((f, i) => `${left[i] ?? ' '.repeat(L)} ${f}`), status]);
   }
+  /* ---------- task details: what the extension's story dialog shows ---------- */
+  type DRow = { kind: 'session'; id: string; label: string; note: string; state?: string; factory: boolean } | { kind: 'file'; file: string; label: string; note: string };
+  const edited = new Map<string, { k: string; files: { file: string; edits: number }[] }>();
+  function editsOf(s: Story, root: string) {
+    const k = (s.sessionIds ?? []).join(','), c = edited.get(s.id);
+    if (c?.k === k) return c.files;
+    const files = editedFiles(root, s.sessionIds ?? []);
+    edited.set(s.id, { k, files });
+    return files;
+  }
+  function details(s: Story): DRow[] {
+    const root = data!.board.projects.find(p => p.id === s.projectId)?.path ?? '';
+    const rel = (f: string) => f.startsWith(root + path.sep) ? f.slice(root.length + 1) : f;
+    const known = data!.sessions[s.projectId] ?? [];
+    const sessions: DRow[] = storySessions(s).map(id => {
+      const role = id === s.builderSessionId ? 'Builder' : id === s.reviewerSessionId ? 'Reviewer' : '';
+      const x = known.find(k => k.id === id), a = data!.agents[id];
+      return { kind: 'session', id, factory: !!role, state: a?.state,
+        label: role ? `${role} session` : x?.title ?? '(session file missing)',
+        note: [role && 'software factory', a ? (a.state === 'blocked' ? '! needs you' : a.state) : x && ago(x.mtime)].filter(Boolean).join(' · ') };
+    });
+    const refs: DRow[] = (s.refs ?? []).map(f => ({ kind: 'file', file: f, label: s.source?.file === f ? `${rel(f)}:${s.source.line}` : rel(f),
+      note: s.source?.file === f ? 'story source' : f === s.refs![0] ? 'plan' : 'epic / sprint' }));
+    const edits: DRow[] = root ? editsOf(s, root).map(f => ({ kind: 'file', file: f.file, label: rel(f.file), note: `${f.edits} edit${f.edits > 1 ? 's' : ''}` })) : [];
+    return [...sessions, ...refs, ...edits];
+  }
+  function detailBox(s: Story, W: number, H: number): string[] {
+    const rows = details(s);
+    prow = Math.max(0, Math.min(prow, rows.length - 1));
+    const hi = rows[prow], run = runOf(s);
+    const out: Seg[][] = [[['✻ ', ORANGE], [s.title, BOLD], [`  ${[LABEL[s.status], meta(s)].filter(Boolean).join(' · ')}`, DIM]]];
+    const desc = (s.description ?? '').trim().split('\n').filter(Boolean);
+    for (const l of desc.slice(0, 3)) out.push([[`  ${l}`, DIM]]);
+    if (desc.length > 3) out.push([[`  … ${desc.length - 3} more lines`, DIM]]);
+    const section = (title: string, list: DRow[], empty: string) => {
+      out.push([['']], [[title, BOLD], [` ${list.length}`, DIM]]);
+      if (!list.length) out.push([[`  ${empty}`, DIM]]);
+      for (const r of list) {
+        const on = r === hi;
+        out.push([[on ? '❯ ' : '  ', ORANGE], [fit(r.label, Math.max(8, W - 36)), on ? ORANGE : ''], [`  ${r.note}`, r.kind === 'session' && r.state === 'blocked' ? YELLOW : DIM]]);
+      }
+    };
+    const n = storySessions(s).length, nr = s.refs?.length ?? 0;
+    section('Claude sessions', rows.slice(0, n), 'No sessions yet. ⏎ on the task starts one.');
+    if (nr) section('Task files', rows.slice(n, n + nr), '');
+    section('Edited files', rows.slice(n + nr), 'None yet.');
+    const sid = hi?.kind === 'session' ? hi.id : undefined;
+    const steps = tail(s, Math.max(3, Math.min(10, Math.floor(H / 4))), sid);
+    out.push([['']], [['Transcript', BOLD], [sid ? '' : run ? ` · ${run.state}` : ' · last session', DIM]]);
+    out.push(...(steps.length ? steps.map(x => stepSegs(x)) : [[['No transcript yet.', DIM] as Seg]]));
+    return box(out.slice(0, Math.max(6, H - 8)), W, ORANGE, '↑↓ select · ⏎ open · space close');
+  }
+  // ⏎ in the details: attach or resume the session, or open the file.
+  function openDetail(s: Story) {
+    const r = details(s)[prow];
+    if (!r) return attach(s, false);
+    if (r.kind === 'file') return launch({ key: `file:${r.file}`, label: r.label }, () => core.handle({ type: 'openFile', id: s.id, file: r.file }));
+    const live = r.state && !['done', 'stopped', 'failed'].includes(r.state);
+    if (live) return launch({ key: s.id, label: s.title }, () => core.handle({ type: 'attach', id: s.id, sessionId: r.id }));
+    if (r.factory) return say('warn', `${r.label} isn't running; its transcript is shown below.`);
+    launch({ key: s.id, label: s.title }, () => core.handle({ type: 'resume', id: s.id, sessionId: r.id }));
+  }
   const HINTS: Record<View, () => string> = {
-    tasks: () => current()?.epic ? '⏎ open epic · ←→ project · / commands' : selected() ? '⏎ attach · space peek · ←→ project · / commands' : '/ commands',
-    board: () => selected() ? '⏎ attach · space peek · ←→ column · shift+←→ move' : '←→ column · / commands',
+    tasks: () => current()?.epic ? '⏎ open epic · ←→ project · / commands' : selected() ? peek ? '↑↓ select · ⏎ open · space close' : '⏎ attach · space details · ←→ project · / commands' : '/ commands',
+    board: () => selected() ? (peek ? '↑↓ select · ⏎ open · space close' : '⏎ attach · space details · ←→ column · shift+←→ move') : '←→ column · / commands',
     epics: () => [...epicHints(), '←→ epic'].join(' · '),
     projects: () => '⏎ open · /add-project · /remove-project',
   };
@@ -456,11 +523,7 @@ export async function tui(boardFile: string) {
     const p = project(), a = asks[0];
     const bottom: string[] = [];
     const ps = peek && view !== 'projects' && view !== 'epics' ? stories().find(s => s.id === peek) : undefined;
-    if (ps && !a) {
-      const steps = tail(ps, Math.max(3, Math.min(14, Math.floor(H / 3))));
-      bottom.push(...box([[['✻ ', ORANGE], [ps.title, BOLD], [runOf(ps) ? ` · ${runOf(ps)!.state}` : ' · last session', DIM]], [['']],
-        ...(steps.length ? steps.map(x => stepSegs(x)) : [[['No transcript yet.', DIM] as Seg]])], W, ORANGE, 'space close · ⏎ attach'));
-    }
+    if (ps && !a) bottom.push(...detailBox(ps, W, H));
     if (a?.kind === 'choice') {
       bottom.push(...box([[[a.text, a.level === 'error' ? RED : a.level === 'warn' ? YELLOW : BOLD]], ...(a.detail ? [[[a.detail, DIM] as Seg]] : []), [['']],
         ...a.actions.map((x, i): Seg[] => [[i === a.cur ? '❯ ' : '  ', ORANGE], [`${i + 1}. ${x}`, i === a.cur ? ORANGE : '']])], W, ORANGE, 'esc later'));
@@ -682,7 +745,7 @@ export async function tui(boardFile: string) {
       case 'quit': return quit();
       case 'help':
         live.print([sgr(BOLD, 'Commands'), ...COMMANDS.map(c => line([[`  /${fit(`${c.name}${c.args ? ` ${c.args}` : ''}`, 38)}`, ORANGE], [c.help + (c.views ? ` (${c.views.join(', ')})` : ''), DIM]], 100).trimEnd()),
-          '', sgr(BOLD, 'Keys'), ...[['↑ ↓', 'move through the list (empty prompt), history otherwise'], ['← →', 'project (tasks), column (board), epic (epics)'], ['shift+← →', 'board: move the task to the previous / next column'], ['space', 'peek at the selected task\'s transcript'],
+          '', sgr(BOLD, 'Keys'), ...[['↑ ↓', 'move through the list (empty prompt), history otherwise'], ['← →', 'project (tasks), column (board), epic (epics)'], ['shift+← →', 'board: move the task to the previous / next column'], ['space', 'task details: sessions, task files, edited files, transcript (↑↓ ⏎ inside)'],
             ['⏎', 'attach the selected task (empty prompt), or send'], ['\\⏎', 'new line'], ['shift+tab', 'cycle views: tasks, board, epics, projects'], ['tab', 'complete / and @'],
             ['ctrl+g', 'edit the prompt in $EDITOR'], ['esc', 'clear the prompt'], ['ctrl+c', 'clear, then quit']].map(([k, h]) => `  ${sgr(ORANGE, fit(k, 12))}${sgr(DIM, h)}`)]);
         return;
@@ -702,6 +765,7 @@ export async function tui(boardFile: string) {
       const e = current();
       if (e?.epic) return openEpic(e.epic.id);
       const s = e?.story;
+      if (s && peek === s.id) return openDetail(s);
       if (s) attach(s, false);
       return;
     }
@@ -785,7 +849,7 @@ export async function tui(boardFile: string) {
     if (key.name === 'escape') { if (a) return done(); if (!pr.value) peek = undefined; pr.value = ''; return render(); }
     if (key.ctrl && key.name === 'g') { editText(ed.value, 'Edit the prompt, then save and quit.').then(t => { if (t !== undefined) ed.value = t; render(); }); return; }
     if (key.name === 'tab' && key.shift) { if (!a) setView(VIEWS[(VIEWS.indexOf(view) + 1) % VIEWS.length]); return render(); }
-    if (str === ' ' && !ed.value && !a && (view === 'tasks' || view === 'board')) { const s = selected(); peek = peek || !s ? undefined : s.id; return render(); }
+    if (str === ' ' && !ed.value && !a && (view === 'tasks' || view === 'board')) { const s = selected(); peek = peek || !s ? undefined : s.id; prow = 0; return render(); }
     if (key.name === 'tab') { if (m[menuAt]) ed.value = m[menuAt].fill; return render(); }
     if (key.name === 'return' || key.name === 'enter') {
       if (pasting || key.meta || ed.value.endsWith('\\')) { ed.value = ed.value.replace(/\\$/, '') + '\n'; return render(); }
@@ -800,7 +864,7 @@ export async function tui(boardFile: string) {
     if (key.name === 'up' || key.name === 'down') {
       const d = key.name === 'up' ? -1 : 1;
       if (m.length) menuAt += d;
-      else if (!ed.value && !a && hi === hist.length) { if (view === 'epics') epicStep(d); else if (view === 'projects') pj += d; else step(d); if (peek) peek = selected()?.id; }
+      else if (!ed.value && !a && hi === hist.length) { if (view === 'epics') epicStep(d); else if (view === 'projects') pj += d; else if (peek) prow += d; else step(d); }
       else if (!a && hist.length) { hi = Math.max(0, Math.min(hi + d, hist.length)); pr.value = hist[hi] ?? ''; }
       return render();
     }
