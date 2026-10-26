@@ -140,9 +140,10 @@ export async function backgroundAgents(): Promise<Record<string, Agent>> {
   return out;
 }
 
-// Every session linked to a story: ones you started, plus the factory's builder and reviewer.
+// Every session linked to a story: the factory's builder and reviewer, then ones you started. Last = the one
+// openStorySession resumes, so the editor and the TUI agree on "the" session.
 export const storySessions = (s: Story) =>
-  [...(s.sessionIds ?? []), s.builderSessionId, s.reviewerSessionId].filter((id): id is string => !!id);
+  [s.builderSessionId, s.reviewerSessionId, ...(s.sessionIds ?? [])].filter((id): id is string => !!id);
 
 // The story's background run still in progress, preferring one that waits for approval.
 export function liveRun(s: Story, agents: Record<string, Agent>): Agent | undefined {
