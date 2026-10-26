@@ -527,9 +527,9 @@ export class FactoryRunner {
     this.store.update('epics', epic.id, { targetBranch: base, pending: { kind: 'pr', busy: Date.now() } });
     this.refresh();
     this.launching.add(epic.id);
-    const wt = worktreeDir(project.path, epic.id);
     try {
-      await git.push(wt, epic.branch!);
+      // Push and open the PR from the main checkout: branches are shared, and pushes from the epic worktree have failed.
+      await git.push(project.path, epic.branch!);
       if (via === 'skill') {
         // Skills draft the PR with you and ask before creating it, so they run interactively; you hand back the URL.
         terminalSession(project, `/${d.skill} ${base} ${epic.branch}`);
@@ -539,7 +539,7 @@ export class FactoryRunner {
       const plan = readPlan(project.path, epic.id);
       const body = [epic.description, plan && `## Plan\n${plan.summary}`, plan && plan.sprints.map(s => `- **${s.key}: ${s.name}**: ${s.stories.map(t => t.title).join('; ')}`).join('\n'),
         '🏭 Built by the LexCode software factory'].filter(Boolean).join('\n\n');
-      await this.prOpened(epic, project, await git.createPr(wt, via, base, epic.branch!, epic.title, body));
+      await this.prOpened(epic, project, await git.createPr(project.path, via, base, epic.branch!, epic.title, body));
     } catch (e: any) {
       this.store.update('epics', epic.id, { pending: { kind: 'pr', reason: e.message } }); // shown in the PR gate
     } finally { this.launching.delete(epic.id); }
