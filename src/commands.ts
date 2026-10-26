@@ -34,6 +34,7 @@ export const COMMANDS: Command[] = [
   { name: 'pr-opened', help: 'Record the PR a skill opened', views: ['epics'] },
   { name: 'open-pr', help: 'Open the PR in the browser', views: ['epics'] },
   { name: 'cancel', help: 'Cancel the epic', views: ['epics'] },
+  { name: 'restart', help: 'Re-plan a cancelled or failed epic from scratch', views: ['epics'] },
   { name: 'shell', help: 'Shell in the project folder' },
   { name: 'add-project', help: 'Track another project folder' },
   { name: 'remove-project', help: 'Stop tracking this project' },
@@ -45,7 +46,7 @@ export const COMMANDS: Command[] = [
 
 // epicView key letter → command name. 'p' is pause or resume, by its label.
 const EPIC_KEYS: Record<string, string> = { a: 'attach', v: 'plan', V: 'plan-source', y: 'approve', C: 'changes', X: 'reject', s: 'start',
-  w: 'builders', m: 'merge', b: 'send-back', R: 'retry', S: 'skip', P: 'pr', u: 'pr-opened', o: 'open-pr', x: 'cancel' };
+  w: 'builders', m: 'merge', b: 'send-back', R: 'retry', S: 'skip', P: 'pr', u: 'pr-opened', o: 'open-pr', x: 'cancel', r: 'restart' };
 export const epicCommand = (key: string, label: string) => key === 'p' ? label : EPIC_KEYS[key];
 
 // Menu entries for a partial "/na": prefix matches first, then substring, current view only.

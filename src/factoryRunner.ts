@@ -14,7 +14,7 @@ import {
 } from './factory';
 
 export type Decision =
-  | { decision: 'approve' | 'reject' | 'retry' | 'cancel' | 'pause' | 'resume' }
+  | { decision: 'approve' | 'reject' | 'retry' | 'cancel' | 'restart' | 'pause' | 'resume' }
   | { decision: 'changes'; text: string }
   | { decision: 'start' | 'workers'; workers: number }
   | { decision: 'approveMerge' | 'retrySprint'; sprintId: string }
@@ -252,6 +252,16 @@ export class FactoryRunner {
           if ((d.decision === 'reject' && atGate) || (d.decision === 'cancel' && epic.stage && !['done', 'cancelled'].includes(epic.stage))) {
             this.store.update('epics', epic.id, { stage: 'cancelled', pending: undefined, stageSessionId: undefined });
           }
+          break;
+        case 'restart':
+          // Re-plan from scratch with the same settings: the old run's sprints go, its stories are archived.
+          // The epic branch and worktrees stay, like cancel left them.
+          if (!['cancelled', 'failed'].includes(epic.stage!)) break;
+          for (const s of b.stories.filter(s => s.epicId === epic.id && s.sprintId)) this.store.update('stories', s.id, { archived: true, sprintId: undefined });
+          for (const sp of b.sprints.filter(s => s.epicId === epic.id)) this.store.remove('sprints', sp.id);
+          this.store.update('epics', epic.id, { stage: 'planning', error: undefined, feedback: undefined, pending: undefined, prUrl: undefined,
+            stageSessionId: undefined, stageStartedAt: undefined, stageAttempts: undefined });
+          await this.launch(this.epic(epic.id)!, 'planning');
           break;
         case 'start': await this.startBuild(epic, project, d.workers); break;
         case 'workers': this.store.update('epics', epic.id, { workers: workerCount(d.workers) }); break;

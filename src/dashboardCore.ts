@@ -46,7 +46,7 @@ function gateDecision(m: any): Decision | undefined {
   const str = (v: unknown) => typeof v === 'string' && v.trim() ? v.trim().slice(0, 20000) : undefined;
   const text = str(m.text), sprintId = str(m.sprintId), storyId = str(m.storyId);
   switch (m.decision) {
-    case 'approve': case 'reject': case 'retry': case 'cancel': case 'pause': case 'resume': return { decision: m.decision };
+    case 'approve': case 'reject': case 'retry': case 'cancel': case 'restart': case 'pause': case 'resume': return { decision: m.decision };
     case 'changes': return text ? { decision: 'changes', text } : undefined;
     case 'start': case 'workers': return typeof m.workers === 'number' ? { decision: m.decision, workers: m.workers } : undefined;
     case 'approveMerge': case 'retrySprint': return sprintId ? { decision: m.decision, sprintId } : undefined;

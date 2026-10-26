@@ -92,6 +92,7 @@ export function epicView(b: Board, e: Epic, agents: Record<string, Agent>, plan?
     }
   }
   if (stage === 'done' && e.prUrl) { lines.push(`PR: ${e.prUrl}`); keys.o = { label: 'open PR', url: e.prUrl }; }
+  if (stage === 'cancelled' || stage === 'failed') keys.r = { label: 'restart', msg: gate('restart') };
   if (!['done', 'cancelled', 'awaitingPlanApproval'].includes(stage)) keys.x = { label: 'cancel', msg: gate('cancel') };
 
   const rows: Row[] = [];
