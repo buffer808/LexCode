@@ -29,7 +29,7 @@ test('epic keys follow the stage, like the dashboard buttons', () => {
   assert.strictEqual(keys(board(epic('awaitingPrApproval'))), 'Px');
   assert.strictEqual(keys(board(epic('awaitingPrApproval', { pending: { kind: 'pr', skill: 'git-release' } }))), 'Pux');
   assert.strictEqual(keys(board(epic('awaitingPrApproval', { pending: { kind: 'pr', busy: Date.now() } }))), 'x'); // creating: no double PR
-  assert.strictEqual(keys(board(epic('done', { prUrl: 'https://x/pr/1' }))), 'o');
+  assert.strictEqual(keys(board(epic('done', { prUrl: 'https://x/pr/1' }))), 'Ao');
   assert.strictEqual(keys(board(epic('cancelled'))), 'r');
   assert.strictEqual(keys(board(epic('failed'))), 'rx');
 });

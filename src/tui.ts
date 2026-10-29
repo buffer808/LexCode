@@ -213,7 +213,7 @@ export async function tui(boardFile: string) {
   /* ---------- epics view: cursor over the epic list, then the selected epic's sprint rows ---------- */
   let selEpic: string | undefined, selRow: string | undefined; // selRow undefined: cursor is on the epic list
   const epicState = () => {
-    const es = data!.board.epics.filter(e => e.projectId === project()?.id && e.stage);
+    const es = data!.board.epics.filter(e => e.projectId === project()?.id && e.stage && !e.archived);
     const e = es.find(x => x.id === selEpic) ?? es[0];
     const v = e && epicView(data!.board, e, data!.agents, data!.factory.plans[e.id]);
     const r = v?.rows.find(x => x.id === selRow);

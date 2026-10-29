@@ -32,6 +32,7 @@ export interface Epic {
   feedback?: string; // human "request changes" text for the next planning run
   pending?: Gate;
   prUrl?: string; error?: string;
+  archived?: boolean; // a finished epic put away; hidden from the tree, epics view and dashboard unless "Show archived"
   attachments?: Attachment[]; // reference files (screenshots, mockups) handed to every factory session
 }
 export interface Sprint {

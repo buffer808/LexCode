@@ -23,6 +23,14 @@ export const worktreeRoot = (repo: string) => path.join(repo, '.lexcode', 'workt
 export const currentBranch = (cwd: string) => git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
 export const headCommit = (cwd: string) => git(cwd, ['rev-parse', 'HEAD']);
 
+// Empty or new folder → a repo whose `branch` has one empty commit, so epic branches can be cut from it.
+// Only for repos without commits: HEAD is unborn, so pointing it at `branch` moves nothing.
+export async function initRepo(repo: string, branch: string) {
+  await git(repo, ['init', '--quiet']);
+  await git(repo, ['symbolic-ref', 'HEAD', `refs/heads/${branch}`]);
+  await git(repo, ['commit', '--allow-empty', '--quiet', '-m', 'Initial commit']);
+}
+
 export async function branchExists(cwd: string, name: string) {
   try { await git(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`]); return true; } catch { return false; }
 }

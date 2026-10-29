@@ -60,8 +60,10 @@ function render() {
     const active = sprints.find(s => s.projectId === p.id && s.active);
     // No manual sprint running: open on the factory epic that is building, so its stories are on the board.
     const running = !active && epics.find(e => e.projectId === p.id && RUNNING.includes(e.stage));
-    const open = stories.filter(s => s.projectId === p.id && s.status !== 'done').length;
-    const total = stories.filter(s => s.projectId === p.id).length;
+    const archivedEpics = new Set(epics.filter(e => e.archived).map(e => e.id));
+    const live = stories.filter(s => s.projectId === p.id && !s.archived && !archivedEpics.has(s.epicId));
+    const open = live.filter(s => s.status !== 'done').length;
+    const total = live.length;
     return h('button', { class: 'card' + (p.id === sel.projectId ? ' selected' : ''),
       onclick: () => running ? select(p.id, ALL, running.id) : select(p.id, active?.id ?? null) },
       h('strong', {}, p.name),
@@ -75,7 +77,9 @@ function render() {
 
   const epicMatch = s => sel.epicId === null || (s.epicId ?? NONE) === sel.epicId;
   // With an epic picked, only offer sprints holding its stories (plus the current one, so the select never lies).
-  const projSprints = sprints.filter(sp => sp.projectId === project.id && (sel.epicId === null || sp.id === sel.sprintId
+  const hidden = new Set(epics.filter(e => e.archived && !sel.showArchived).map(e => e.id)); // archived epics take their sprints along
+  const spent = sp => { const own = stories.filter(s => s.sprintId === sp.id); return own.length > 0 && own.every(s => s.archived); }; // all stories archived
+  const projSprints = sprints.filter(sp => sp.projectId === project.id && !hidden.has(sp.epicId) && (sel.showArchived || !spent(sp)) && (sel.epicId === null || sp.id === sel.sprintId
     || stories.some(s => s.sprintId === sp.id && epicMatch(s))));
   const picker = h('select', { onchange: e => select(project.id, e.target.value || null, sel.epicId) },
     h('option', { value: '' }, 'Backlog'),
@@ -83,15 +87,17 @@ function render() {
     projSprints.map(s => h('option', { value: s.id, selected: s.id === sel.sprintId },
       s.name + (s.active ? ' (active)' : !['waiting', 'merged', undefined].includes(s.state) ? ` · ${SPRINT_STATE[s.state]}` : ''))));
 
-  const projEpics = epics.filter(e => e.projectId === project.id);
+  const projEpics = epics.filter(e => e.projectId === project.id && (sel.showArchived || !e.archived));
   const epicFilter = h('select', { 'aria-label': 'Filter by epic', onchange: e => select(project.id, sel.sprintId, e.target.value || null) },
     h('option', { value: '' }, 'All epics'),
     h('option', { value: NONE, selected: sel.epicId === NONE }, '(no epic)'),
     projEpics.map(e => h('option', { value: e.id, selected: e.id === sel.epicId }, e.title)));
 
+  const filtered = projEpics.find(e => e.id === sel.epicId);
   app.append(h('h2', { class: 'project' }, project.name), h('header', {}, picker, projEpics.length ? epicFilter : null, h('span', { class: 'spacer' }),
     h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: sel.showArchived,
       onchange: e => { sel.showArchived = e.target.checked; vscode.setState(sel); render(); } }), 'Show archived'),
+    filtered && h('button', { onclick: () => openEpicEdit(filtered) }, 'Edit epic'),
     h('button', { class: 'primary', onclick: () => openEpicForm(project) }, '+ Epic'),
     h('button', { onclick: () => vscode.postMessage({ type: 'openProject', id: project.id }) }, 'Open in workspace'),
     h('button', { onclick: () => vscode.postMessage({ type: 'importTasks', id: project.id }) }, 'Import tasks'),
@@ -259,6 +265,7 @@ function epicStrip(e) {
           onclick: () => onBoard ? select(e.projectId, null, null) : select(e.projectId, ALL, e.id) }, onBoard ? '✓ On board' : 'Show on board'),
         plan && h('button', { onclick: () => openPlan(false) }, 'View plan'),
         !['done', 'cancelled', 'awaitingPlanApproval'].includes(e.stage) && h('button', { class: 'quiet', onclick: () => gate(e.id, 'cancel') }, 'Cancel'),
+        e.stage === 'done' && !e.archived && h('button', { class: 'quiet', onclick: () => gate(e.id, 'archive') }, 'Archive'),
         ['cancelled', 'failed'].includes(e.stage) && h('button', { class: 'primary', onclick: () => gate(e.id, 'restart') }, 'Restart'))),
     stepper(e),
     role && !e.error && activity(sessionState(e.stageSessionId), `${e.roleAgents?.[role] ?? `LexCode ${role}`} ${STAGE_VERB[e.stage]}`,
@@ -453,6 +460,28 @@ function openEpicForm(project) {
         err,
         h('button', { class: 'primary', onclick: () => submit(true) }, 'Create & plan'),
         h('button', { onclick: () => submit(false) }, 'Create without factory')))));
+  epicDialog.showModal();
+  title.focus();
+}
+
+// Title and description only: the factory has already planned from the description, so editing it later doesn't replan.
+function openEpicEdit(e) {
+  const title = h('input', { class: 'title', value: e.title, 'aria-label': 'Epic title' });
+  const desc = h('textarea', { 'data-key': 'epic-desc', placeholder: 'Goal, constraints, acceptance criteria.', 'aria-label': 'Description' });
+  desc.value = e.description ?? '';
+  const err = h('p', { class: 'error' });
+  const save = () => {
+    if (!title.value.trim()) { err.textContent = 'Title is required.'; return title.focus(); }
+    vscode.postMessage({ type: 'updateEpic', epicId: e.id, title: title.value, description: desc.value });
+    epicDialog.close();
+  };
+  epicDialog.replaceChildren(h('div', { class: 'modal' },
+    h('header', {}, title, h('button', { class: 'x close', title: 'Close', 'aria-label': 'Close', onclick: () => epicDialog.close() }, '×')),
+    h('div', { class: 'body' },
+      h('main', {}, h('h4', {}, 'Description'), mdEditor(desc)),
+      h('aside', {},
+        e.stage && h('p', { class: 'muted hint' }, 'The factory has already planned from the description; edits here don\'t replan.'),
+        err, h('button', { class: 'primary', onclick: save }, 'Save')))));
   epicDialog.showModal();
   title.focus();
 }

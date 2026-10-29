@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { Store, Project, Epic, Sprint, Story } from './store';
 import { listSessions, Session } from './sessions';
-import { STAGE_LABEL } from './factory';
+import { STAGE_LABEL, PLANNING } from './factory';
 import { Agent, liveRun, storySessions } from './claude';
 
 // epic undefined = "No epic" group; sprint undefined = backlog.
@@ -26,6 +26,13 @@ export class BoardTree implements vscode.TreeDataProvider<Node> {
 
   constructor(private store: Store, private agents: () => Record<string, Agent> = () => ({})) {}
 
+  // Group icon: ⚠ if any story run waits for approval, spinner if one is running (or `busy`), else `icon`.
+  private groupIcon(stories: Story[], icon: string, busy = false) {
+    const runs = stories.map(s => liveRun(s, this.agents())).filter(Boolean);
+    return runs.some(r => r!.state === 'blocked') ? new vscode.ThemeIcon('warning', new vscode.ThemeColor('list.warningForeground'))
+      : busy || runs.length ? new vscode.ThemeIcon('loading~spin') : new vscode.ThemeIcon(icon);
+  }
+
   refresh() { this.store.reload(); this.changed.fire(); }
 
   getChildren(node?: Node): Node[] {
@@ -33,7 +40,7 @@ export class BoardTree implements vscode.TreeDataProvider<Node> {
     if (!node) return b.projects.map(project => ({ kind: 'project', project }));
     if (node.kind === 'project') {
       const p = node.project;
-      const epics: Node[] = b.epics.filter(e => e.projectId === p.id).map(epic => ({ kind: 'epic', project: p, epic }));
+      const epics: Node[] = b.epics.filter(e => e.projectId === p.id && !e.archived).map(epic => ({ kind: 'epic', project: p, epic }));
       const hasLoose = b.stories.some(s => s.projectId === p.id && !s.epicId);
       return [...epics, ...(hasLoose || !epics.length ? [{ kind: 'epic', project: p } as Node] : []), { kind: 'sessions', project: p }];
     }
@@ -42,7 +49,9 @@ export class BoardTree implements vscode.TreeDataProvider<Node> {
       // is active, or is still empty (so "+ story" there sets both epic and sprint).
       const live = b.stories.filter(s => s.projectId === node.project.id && !s.archived);
       // Factory sprints belong to one epic and only show there.
-      const sprints = b.sprints.filter(sp => sp.projectId === node.project.id && (sp.epicId ? sp.epicId === node.epic?.id : sp.active
+      // A sprint whose stories are all archived is archived too; an empty one is still new.
+      const spent = (sp: Sprint) => { const own = b.stories.filter(s => s.sprintId === sp.id); return own.length > 0 && own.every(s => s.archived); };
+      const sprints = b.sprints.filter(sp => sp.projectId === node.project.id && !spent(sp) && (sp.epicId ? sp.epicId === node.epic?.id : sp.active
         || live.some(s => s.sprintId === sp.id && s.epicId === node.epic?.id)
         || !live.some(s => s.sprintId === sp.id)))
         .sort((x, y) => Number(y.active) - Number(x.active) || (x.order ?? 0) - (y.order ?? 0));
@@ -71,12 +80,13 @@ export class BoardTree implements vscode.TreeDataProvider<Node> {
       return item;
     }
     if (node.kind === 'epic') {
-      const item = new vscode.TreeItem(node.epic ? `Epic: ${node.epic.title}` : 'No epic', C.Expanded);
+      const item = new vscode.TreeItem(node.epic ? `Epic: ${node.epic.title}` : 'No epic', C.Collapsed);
       const n = b.stories.filter(s => s.projectId === node.project.id && s.epicId === node.epic?.id);
       const stage = node.epic?.stage && STAGE_LABEL[node.epic.stage];
       item.description = `${stage ? `${stage}${node.epic!.error ? ' ⚠' : ''} · ` : ''}${n.filter(s => s.status === 'done').length}/${n.length} done`;
       if (node.epic?.error) item.tooltip = node.epic.error;
-      item.iconPath = new vscode.ThemeIcon(node.epic ? 'layers' : 'layers-dot');
+      const stg = node.epic?.stage;
+      item.iconPath = this.groupIcon(n.filter(s => !s.archived), node.epic ? 'layers' : 'layers-dot', stg === 'building' || PLANNING.includes(stg!));
       item.contextValue = node.epic ? 'epic' : 'noEpic';
       return item;
     }
@@ -84,7 +94,7 @@ export class BoardTree implements vscode.TreeDataProvider<Node> {
       const s = node.sprint;
       const item = new vscode.TreeItem(s ? s.name : 'Backlog', s?.active ? C.Expanded : C.Collapsed);
       item.description = s?.active ? 'active' : s && [s.start, s.end].filter(Boolean).join(' → ');
-      item.iconPath = new vscode.ThemeIcon(s ? 'milestone' : 'inbox');
+      item.iconPath = this.groupIcon(this.getChildren(node).map(c => (c as { story: Story }).story), s ? 'milestone' : 'inbox');
       item.contextValue = s ? 'sprint' : 'backlog';
       return item;
     }
@@ -107,7 +117,8 @@ export class BoardTree implements vscode.TreeDataProvider<Node> {
     item.description = [st.status, st.points != null && `${st.points}pt`,
       run ? (run.state === 'blocked' ? '⚠ needs approval' : run.state) : n && `${n} session${n > 1 ? 's' : ''}`].filter(Boolean).join(' · ');
     item.tooltip = st.description;
-    item.iconPath = new vscode.ThemeIcon(statusIcon[st.status]);
+    item.iconPath = run?.state === 'blocked' ? new vscode.ThemeIcon('warning', new vscode.ThemeColor('list.warningForeground'))
+      : run ? new vscode.ThemeIcon('loading~spin') : new vscode.ThemeIcon(statusIcon[st.status]);
     item.contextValue = run ? 'story live' : n ? 'story linked' : 'story';
     return item;
   }

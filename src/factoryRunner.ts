@@ -14,7 +14,7 @@ import {
 } from './factory';
 
 export type Decision =
-  | { decision: 'approve' | 'reject' | 'retry' | 'cancel' | 'restart' | 'pause' | 'resume' }
+  | { decision: 'approve' | 'reject' | 'retry' | 'cancel' | 'restart' | 'archive' | 'pause' | 'resume' }
   | { decision: 'changes'; text: string }
   | { decision: 'start' | 'workers'; workers: number }
   | { decision: 'approveMerge' | 'retrySprint'; sprintId: string }
@@ -70,10 +70,13 @@ export class FactoryRunner {
   // New factory epic (or an existing manual one, by id): freezes role → agent mapping, cuts the epic branch from the
   // PR target into its own worktree, then plans there, so plan, build and PR all start from the target branch.
   async create(project: Project, input: EpicInput, existingId?: string): Promise<Epic> {
-    try { await git.currentBranch(project.path); } catch {
-      throw new Error(`${project.name} is not a git repository; the factory needs git for epic branches and PRs.`);
-    }
     const targetBranch = input.targetBranch ?? this.setting('targetBranch', 'main');
+    try { await git.headCommit(project.path); } catch { // not a repo, or no commits yet
+      const ok = await host().message('warn', `${project.name} has no git history yet; the factory needs git for epic branches and PRs.`,
+        { modal: true, detail: `Initialize git and make an empty initial commit on "${targetBranch}"?` }, 'Initialize git');
+      if (!ok) throw new Error(`${project.name} is not a git repository with commits; the factory needs git for epic branches and PRs.`);
+      await git.initRepo(project.path, targetBranch);
+    }
     let baseBranch: string;
     try { baseBranch = await git.resolveBase(project.path, targetBranch); }
     catch (e: any) { throw new Error(`Can't cut the epic branch: ${e.message}. Pick an existing PR target branch.`); }
@@ -262,6 +265,11 @@ export class FactoryRunner {
           this.store.update('epics', epic.id, { stage: 'planning', error: undefined, feedback: undefined, pending: undefined, prUrl: undefined,
             stageSessionId: undefined, stageStartedAt: undefined, stageAttempts: undefined });
           await this.launch(this.epic(epic.id)!, 'planning');
+          break;
+        case 'archive':
+          if (epic.stage !== 'done') break;
+          for (const s of b.stories.filter(s => s.epicId === epic.id)) this.store.update('stories', s.id, { archived: true });
+          this.store.update('epics', epic.id, { archived: true });
           break;
         case 'start': await this.startBuild(epic, project, d.workers); break;
         case 'workers': this.store.update('epics', epic.id, { workers: workerCount(d.workers) }); break;
@@ -528,14 +536,15 @@ export class FactoryRunner {
     this.refresh();
     this.launching.add(epic.id);
     try {
-      // Push and open the PR from the main checkout: branches are shared, and pushes from the epic worktree have failed.
-      await git.push(project.path, epic.branch!);
       if (via === 'skill') {
         // Skills draft the PR with you and ask before creating it, so they run interactively; you hand back the URL.
-        terminalSession(project, `/${d.skill} ${base} ${epic.branch}`);
+        // No push here: ssh from the extension host gets "Connection reset" where the user's terminal works, so the skill pushes.
+        terminalSession(project, `/${d.skill} ${base} ${epic.branch}. Push the branch to origin first if it is not there yet.`);
         this.store.update('epics', epic.id, { pending: { kind: 'pr', skill: d.skill } });
         return;
       }
+      // Push and open the PR from the main checkout: branches are shared, and pushes from the epic worktree have failed.
+      await git.push(project.path, epic.branch!);
       const plan = readPlan(project.path, epic.id);
       const body = [epic.description, plan && `## Plan\n${plan.summary}`, plan && plan.sprints.map(s => `- **${s.key}: ${s.name}**: ${s.stories.map(t => t.title).join('; ')}`).join('\n'),
         '🏭 Built by the LexCode software factory'].filter(Boolean).join('\n\n');

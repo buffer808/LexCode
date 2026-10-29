@@ -127,7 +127,8 @@ export function activate(context: vscode.ExtensionContext) {
       { ...opts, placeHolder: `${title}: how should builder agents run?` });
     if (!pick) return;
     if (!pick.mode) return store.add('epics', { projectId: p.id, title });
-    const description = await vscode.window.showInputBox({ ...opts, prompt: `Describe "${title}" for the orchestrator: goal, constraints, acceptance criteria`, value: prefill });
+    // An existing epic's saved description (Edit epic) is the brief; only ask when there is none.
+    const description = existingId && prefill?.trim() ? prefill : await vscode.window.showInputBox({ ...opts, prompt: `Describe "${title}" for the orchestrator: goal, constraints, acceptance criteria`, value: prefill });
     if (description === undefined) return;
     const targetBranch = await vscode.window.showInputBox({ ...opts, prompt: 'Target branch: the epic branch is cut from it, and the PR goes back into it', value: cfg.get('targetBranch', 'main'),
       validateInput: v => validBranch(v.trim()) ? undefined : 'Not a valid branch name' });
@@ -147,7 +148,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
     let epic;
     try { epic = await factory.create(p, parseEpicInput({ title, description, targetBranch, builderMode: pick.mode, models }, defs, roles), existingId); }
-    catch (e: any) { return vscode.window.showErrorMessage(e.message); }
+    catch (e: any) { log.appendLine(`factory: ${title}: ${e.message}`); vscode.window.showErrorMessage(e.message); return; }
     const lead = epic.roleAgents?.orchestrator;
     vscode.window.showInformationMessage(`Planning "${title}" with ${lead ? `your ${lead} agent` : 'the LexCode orchestrator'}. You'll be asked to approve the plan.`);
     return epic;
@@ -254,7 +255,9 @@ export function activate(context: vscode.ExtensionContext) {
       if (node.epic.stage && !['cancelled', 'failed'].includes(node.epic.stage)) {
         return vscode.window.showInformationMessage(`"${node.epic.title}" is already a factory epic (${node.epic.stage}).`);
       }
-      await factoryEpic(node.project, node.epic.title, node.epic.id);
+      log.appendLine(`runFactory: ${node.epic.title} (${node.epic.id})`);
+      const epic = await factoryEpic(node.project, node.epic.title, node.epic.id, node.epic.description);
+      if (!epic) log.appendLine(`runFactory: ${node.epic.title} not started (a prompt was dismissed or the factory refused it)`);
     }),
 
     cmd('lexCode.newSprint', async (node?: Node) => {

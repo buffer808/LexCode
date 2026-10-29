@@ -46,7 +46,7 @@ function gateDecision(m: any): Decision | undefined {
   const str = (v: unknown) => typeof v === 'string' && v.trim() ? v.trim().slice(0, 20000) : undefined;
   const text = str(m.text), sprintId = str(m.sprintId), storyId = str(m.storyId);
   switch (m.decision) {
-    case 'approve': case 'reject': case 'retry': case 'cancel': case 'restart': case 'pause': case 'resume': return { decision: m.decision };
+    case 'approve': case 'reject': case 'retry': case 'cancel': case 'restart': case 'archive': case 'pause': case 'resume': return { decision: m.decision };
     case 'changes': return text ? { decision: 'changes', text } : undefined;
     case 'start': case 'workers': return typeof m.workers === 'number' ? { decision: m.decision, workers: m.workers } : undefined;
     case 'approveMerge': case 'retrySprint': return sprintId ? { decision: m.decision, sprintId } : undefined;
@@ -218,7 +218,8 @@ export function dashboardCore(store: Store, agents: AgentWatcher, factory: Facto
           attachments: uploads.flatMap(u => saveAttachment(store.attachmentsDir(epicId), u) ?? []) });
         if (!m.start) {
           const title = typeof m.title === 'string' ? m.title.trim().slice(0, 200) : '';
-          if (title) withFiles(store.add('epics', { projectId: project.id, title }).id);
+          const description = typeof m.description === 'string' && m.description.trim() ? m.description : undefined;
+          if (title) withFiles(store.add('epics', { projectId: project.id, title, description }).id);
           break;
         }
         const { agents: defs, roles } = factory.detectedRoles(project);
@@ -231,6 +232,13 @@ export function dashboardCore(store: Store, agents: AgentWatcher, factory: Facto
           if (draft) store.remove('epics', draft); // also deletes its files
           return host().message('error', e.message);
         }
+        break;
+      }
+      case 'updateEpic': {
+        const e = b.epics.find(e => e.id === m.epicId);
+        const title = typeof m.title === 'string' ? m.title.trim().slice(0, 200) : '';
+        if (!e || !title || typeof m.description !== 'string') return host().log(`updateEpic rejected: ${JSON.stringify(m)}`);
+        store.update('epics', e.id, { title, description: m.description.trim() ? m.description : undefined });
         break;
       }
       case 'factoryGate': {
